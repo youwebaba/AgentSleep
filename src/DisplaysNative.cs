@@ -8,7 +8,10 @@ namespace AgentSleep
         internal const uint Active = 1, VirtualMode = 8, BoostRefresh = 16;
         internal const uint None = uint.MaxValue;
         private const uint QueryAll = 0x51, QueryActive = 0x52;
-        private const uint Supplied = 0x28020, Validate = 0x40, Apply = 0x80;
+        private const uint Supplied = 0x28020, Validate = 0x40;
+#if !DRY_RUN_ONLY
+        private const uint Apply = 0x80;
+#endif
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct Luid { public uint Low; public int High; }
@@ -209,7 +212,13 @@ namespace AgentSleep
 
         internal static int Set(Path[] paths, Mode[] modes, bool apply)
         {
-            return SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes, Supplied | (apply ? Apply : Validate));
+#if DRY_RUN_ONLY
+            if (apply) throw new NotSupportedException("This build can only validate Windows display layouts.");
+            const uint flags = Supplied | Validate;
+#else
+            uint flags = Supplied | (apply ? Apply : Validate);
+#endif
+            return SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes, flags);
         }
 
         internal static void Check(int status, string action)

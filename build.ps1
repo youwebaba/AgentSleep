@@ -17,7 +17,7 @@ if ($DryRunOnly) {
     $app = Join-Path $output 'AgentSleep.DryRun.exe'
     $drySources = @($sources | Where-Object { (Split-Path -Leaf $_) -like 'Displays*.cs' })
     $drySources += Join-Path $PSScriptRoot 'src/TrayDryRun.cs'
-    & $compiler @common /target:exe /main:AgentSleep.TrayDryRun "/win32manifest:$manifest" "/out:$app" @drySources
+    & $compiler @common /define:DRY_RUN_ONLY /target:exe /main:AgentSleep.TrayDryRun "/win32manifest:$manifest" "/out:$app" @drySources
 } else {
     $app = Join-Path $output 'AgentSleep.exe'
     & $compiler @common @references /target:winexe /main:AgentSleep.Program "/win32manifest:$manifest" "/out:$app" @sources

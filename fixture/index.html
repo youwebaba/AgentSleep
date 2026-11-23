@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentSleep Desktop Trial</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --base: #111a24;
+      --surface: #182533;
+      --edge: #394f62;
+      --ink: #f1f6fa;
+      --muted: #b6c9d8;
+      --accent: #6ee7cb;
+      --focus: #ffd482;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--base);
+      color: var(--ink);
+      font: 16px/1.45 system-ui, sans-serif;
+    }
+    main { width: min(1080px, calc(100% - 32px)); margin: 32px auto 48px; }
+    h1 { margin: 0 0 4px; font-size: clamp(1.9rem, 5vw, 2.75rem); letter-spacing: -.035em; }
+    h2 { margin: 0 0 12px; font-size: 1.15rem; }
+    p { margin: 0; }
+    .muted, label, th { color: var(--muted); }
+    form, .layout, .summary { margin-top: 18px; }
+    form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+    label { display: block; margin-bottom: 5px; font-weight: 650; }
+    button, select, input {
+      min-height: 44px;
+      padding: 9px 13px;
+      border: 1px solid var(--edge);
+      border-radius: 8px;
+      background: #101d2a;
+      color: var(--ink);
+      font: inherit;
+    }
+    select, button { cursor: pointer; }
+    button { font-weight: 720; }
+    button:hover { border-color: var(--accent); }
+    :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+    section {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid var(--edge);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    .metadata { margin-bottom: 8px; }
+    time, code, .counter, input { font-family: ui-monospace, Consolas, monospace; }
+    #clock { display: block; font-size: clamp(.95rem, 2.5vw, 1.35rem); font-weight: 700; }
+    #challenge { display: block; margin: 10px 0 0; color: var(--accent); font-size: 2rem; font-weight: 800; }
+    #count-click {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      width: 100%;
+      max-width: 320px;
+      gap: 12px;
+      background: var(--accent);
+      color: #062820;
+      border-color: transparent;
+    }
+    .counter { font-size: 1.25rem; }
+    #response { display: block; width: 100%; max-width: 320px; }
+    .evidence { margin: 8px 0 12px; overflow-wrap: anywhere; }
+    .footnote { margin-top: 8px; }
+    #match-state[data-matched="true"] { color: var(--accent); font-weight: 700; }
+    .scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; white-space: nowrap; }
+    td, th { border-bottom: 1px solid var(--edge); padding: 8px 14px 8px 0; }
+    tbody tr:last-child td { border-bottom: 0; }
+    @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>AgentSleep desktop trial</h1>
+      <p class="muted">Read the UTC clock and challenge from a screenshot. Click the counter, type the challenge, then capture the updated page.</p>
+    </header>
+
+    <form id="start-run">
+      <div>
+        <label for="condition">Display condition</label>
+        <select id="condition">
+          <option>Physical panels on</option>
+          <option>Normal Windows idle-off</option>
+          <option>AgentSleep virtual-only</option>
+        </select>
+      </div>
+      <button type="submit">Start new run</button>
+    </form>
+
+    <div class="layout">
+      <section aria-labelledby="run-heading">
+        <h2 id="run-heading">Current run</h2>
+        <p class="metadata"><strong id="current-condition"></strong> · <code id="run-id"></code></p>
+        <p class="muted">Live UTC clock</p>
+        <time id="clock"></time>
+        <p class="muted footnote">Challenge</p>
+        <code id="challenge"></code>
+        <p class="muted footnote">The operator records when every physical panel goes dark and when the first panel wakes.</p>
+      </section>
+
+      <section aria-labelledby="input-heading">
+        <h2 id="input-heading">Input evidence</h2>
+        <button id="count-click" type="button">
+          Record a click <span>Count <span class="counter" id="click-count">0</span></span>
+        </button>
+        <p class="evidence"><span class="muted">Last click received UTC</span> <time id="click-time">—</time></p>
+
+        <label for="response">Type the challenge exactly</label>
+        <input id="response" type="text" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <p class="evidence"><span class="muted">First exact match UTC</span> <time id="match-time">—</time></p>
+        <p id="match-state" role="status">Waiting for exact match</p>
+        <p class="muted footnote">Browser-trusted events count. Ignored synthetic events <output id="ignored-count">0</output></p>
+      </section>
+    </div>
+
+    <section class="summary" aria-labelledby="summary-heading">
+      <h2 id="summary-heading">Run history</h2>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Condition</th>
+              <th scope="col">Run ID</th>
+              <th scope="col">Clicks</th>
+              <th scope="col">First click UTC</th>
+              <th scope="col">First match UTC</th>
+            </tr>
+          </thead>
+          <tbody id="history"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    "use strict";
+
+    const byId = id => document.getElementById(id);
+    const timestamp = () => new Date().toISOString();
+    const condition = byId("condition");
+    const response = byId("response");
+    const historyRows = byId("history");
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let challenge;
+    let run;
+
+    function randomBytes(count) {
+      return crypto.getRandomValues(new Uint8Array(count));
+    }
+
+    function showTime(element, time) {
+      element.textContent = time || "—";
+      if (time) element.dateTime = time;
+      else element.removeAttribute("datetime");
+    }
+
+    function updateEvidence() {
+      byId("click-count").textContent = run.clicks;
+      byId("ignored-count").textContent = run.ignored;
+      showTime(byId("click-time"), run.lastClick);
+      showTime(byId("match-time"), run.match);
+
+      const matchState = byId("match-state");
+      const matchText = run.match ? "Exact challenge matched" : "Waiting for exact match";
+      if (matchState.textContent !== matchText) matchState.textContent = matchText;
+      matchState.dataset.matched = Boolean(run.match);
+      run.row.cells[2].textContent = run.clicks;
+      run.row.cells[3].textContent = run.firstClick || "—";
+      run.row.cells[4].textContent = run.match || "—";
+    }
+
+    function startRun() {
+      const id = Array.from(randomBytes(8), byte => byte.toString(16).padStart(2, "0")).join("").toUpperCase();
+      const characters = Array.from(randomBytes(8), byte => alphabet[byte % alphabet.length]).join("");
+      challenge = characters.slice(0, 4) + "-" + characters.slice(4);
+
+      const row = historyRows.insertRow(0);
+      for (let index = 0; index < 5; index++) row.insertCell();
+      row.cells[0].textContent = condition.value;
+      row.cells[1].textContent = id;
+      run = { row, clicks: 0, ignored: 0, firstClick: null, lastClick: null, match: null };
+
+      byId("current-condition").textContent = condition.value;
+      byId("run-id").textContent = id;
+      byId("challenge").textContent = challenge;
+      response.value = "";
+      updateEvidence();
+    }
+
+    function ignoreSynthetic(event) {
+      if (event.isTrusted) return false;
+      run.ignored++;
+      updateEvidence();
+      return true;
+    }
+
+    byId("start-run").addEventListener("submit", event => {
+      event.preventDefault();
+      startRun();
+    });
+    byId("count-click").addEventListener("click", event => {
+      if (ignoreSynthetic(event)) return;
+      run.clicks++;
+      run.lastClick = timestamp();
+      if (!run.firstClick) run.firstClick = run.lastClick;
+      updateEvidence();
+    });
+    response.addEventListener("input", event => {
+      if (ignoreSynthetic(event) || run.match || response.value !== challenge) return;
+      run.match = timestamp();
+      updateEvidence();
+    });
+
+    const clock = byId("clock");
+    showTime(clock, timestamp());
+    setInterval(() => showTime(clock, timestamp()), 200);
+    startRun();
+  </script>
+</body>
+</html>

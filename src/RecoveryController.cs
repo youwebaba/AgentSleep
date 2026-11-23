@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace AgentSleep
@@ -18,7 +19,8 @@ namespace AgentSleep
             catch (AbandonedMutexException) { return true; }
         }
 
-        internal static int Watch(RecoveryStorage storage, IDisplays displays, Guid id, int trialMilliseconds)
+        internal static int Watch(RecoveryStorage storage, IDisplays displays, Guid id,
+            Func<IDisposable> keepSystemAwake, int trialMilliseconds, int heartbeatMilliseconds = HeartbeatMilliseconds)
         {
             using (var signals = RecoverySignals.Open(storage, id, false))
             {
@@ -29,33 +31,38 @@ namespace AgentSleep
                     using (var owner = RecoveryOwner.Open(record, storage.Session))
                     {
                         if (owner == null || owner.Exited) return Restore(storage, displays, id, RecoveryReason.OwnerExit, signals);
-                        var clock = Stopwatch.StartNew();
-                        bool isolated = false;
-                        long pulse = 0;
-                        signals.Ready.Set();
-
-                        while (true)
+                        if (!owner.MatchesCurrentImage()) return 2;
+                        using (var wakeRequest = keepSystemAwake())
                         {
-                            record = storage.Read();
-                            if (record == null || record.Id != id || !record.Pending) return 0;
-                            if (record.Phase == RecoveryPhase.Failed) return 2;
-                            if (record.Phase == RecoveryPhase.Fallback) return 3;
-                            if (signals.Manual.WaitOne(0))
-                                return Restore(storage, displays, id, RecoveryReason.Manual, signals, owner);
-                            if (owner.Exited)
-                                return Restore(storage, displays, id, RecoveryReason.OwnerExit, signals, owner);
+                            if (wakeRequest == null) throw new IOException("watchdog-power-request");
+                            var clock = Stopwatch.StartNew();
+                            bool isolated = false;
+                            long pulse = 0;
+                            signals.Ready.Set();
 
-                            long now = clock.ElapsedMilliseconds;
-                            if (record.Phase == RecoveryPhase.Isolated && !isolated)
+                            while (true)
                             {
-                                isolated = true;
-                                pulse = now;
+                                record = storage.Read();
+                                if (record == null || record.Id != id || !record.Pending) return 0;
+                                if (record.Phase == RecoveryPhase.Failed) return 2;
+                                if (record.Phase == RecoveryPhase.Fallback) return 3;
+                                if (signals.Manual.WaitOne(0))
+                                    return Restore(storage, displays, id, RecoveryReason.Manual, signals, owner);
+                                if (owner.Exited)
+                                    return Restore(storage, displays, id, RecoveryReason.OwnerExit, signals, owner);
+
+                                long now = clock.ElapsedMilliseconds;
+                                if (record.Phase == RecoveryPhase.Isolated && !isolated)
+                                {
+                                    isolated = true;
+                                    pulse = now;
+                                }
+                                if ((record.Timed || !isolated) && now >= trialMilliseconds)
+                                    return Restore(storage, displays, id, RecoveryReason.Deadline, signals, owner);
+                                if (isolated && now - pulse >= heartbeatMilliseconds)
+                                    return Restore(storage, displays, id, RecoveryReason.OwnerHang, signals, owner);
+                                if (signals.Pulse.WaitOne(60)) pulse = clock.ElapsedMilliseconds;
                             }
-                            if ((record.Timed || !isolated) && now >= trialMilliseconds)
-                                return Restore(storage, displays, id, RecoveryReason.Deadline, signals, owner);
-                            if (isolated && now - pulse >= HeartbeatMilliseconds)
-                                return Restore(storage, displays, id, RecoveryReason.OwnerHang, signals, owner);
-                            if (signals.Pulse.WaitOne(60)) pulse = clock.ElapsedMilliseconds;
                         }
                     }
                 }
@@ -177,6 +184,7 @@ namespace AgentSleep
         private Process helper;
         private int queued;
         private int queueFinished;
+        private const int QueuedSuccess = 1;
         private bool triedRecovery;
         private bool ownsRecord;
         private bool disposed;
@@ -184,6 +192,8 @@ namespace AgentSleep
         internal string State { get; private set; }
         internal string Detail { get; private set; }
         internal bool Pending { get; private set; }
+        internal bool OwnsRecord { get { return ownsRecord; } }
+        internal bool QueuedRestorePending { get { return Volatile.Read(ref queued) != 0; } }
 
         internal RecoveryController(IDisplays displays)
             : this(displays, OpenStorage(), RecoveryCommands.Launch, RecoveryWorker.ArmMilliseconds) { }
@@ -203,13 +213,10 @@ namespace AgentSleep
             }
             try
             {
+                CleanupReceipt(Guid.Empty, true);
                 RecoveryRecord record = storage.Read();
                 if (record == null) return;
-                if (!record.Pending)
-                {
-                    CleanupReceipt(Guid.Empty, true);
-                    return;
-                }
+                if (!record.Pending) return;
                 id = record.Id;
                 Update(record);
                 if (record.Phase != RecoveryPhase.Failed && record.Phase != RecoveryPhase.Fallback)
@@ -221,7 +228,6 @@ namespace AgentSleep
             catch (RecoveryStaleException)
             {
                 Set("idle", "prior-logon-snapshot");
-                CleanupReceipt(Guid.Empty, true);
             }
             catch (Exception) { Set("failed", "recovery-journal-unreadable"); }
         }
@@ -234,7 +240,7 @@ namespace AgentSleep
 
         internal void Start(string targetId, bool timedTrial)
         {
-            if (disposed || storage == null || Volatile.Read(ref queued) != 0 || Pending) return;
+            if (disposed || storage == null || QueuedRestorePending || Pending) return;
             if (String.IsNullOrWhiteSpace(targetId))
             {
                 Set("failed", "target-required");
@@ -272,12 +278,16 @@ namespace AgentSleep
                         if (previous != null && previous.Pending)
                         {
                             CloseHandles();
+                            ownsRecord = false;
                             id = previous.Id;
                             Update(previous);
                             return;
                         }
 
                         CloseHandles();
+                        if (ownsRecord && id != Guid.Empty && previous != null && previous.Id == id)
+                            storage.RemoveReceipt(previous, false);
+                        ownsRecord = false;
                         id = Guid.Empty;
                         byte[] baseline = displays.Capture();
                         if (baseline == null || baseline.Length == 0) throw new IOException();
@@ -310,7 +320,8 @@ namespace AgentSleep
 
                 Set("arming", "arming-watchdog");
                 helper = launch(id);
-                if (helper == null || !signals.Ready.WaitOne(armMilliseconds) || helper.HasExited)
+                if (helper == null || WaitHandle.WaitAny(new WaitHandle[] { signals.Ready, signals.Failed }, armMilliseconds) != 0
+                    || helper.HasExited)
                     throw new IOException();
                 armed = true;
                 ApplyStep(RecoveryPhase.Prepared, RecoveryPhase.Extending,
@@ -351,9 +362,9 @@ namespace AgentSleep
             using (var gate = storage.OpenGate())
             {
                 if (!RecoveryWorker.Enter(gate, 0)) throw new IOException();
-                signals.Mutation.Set();
                 try
                 {
+                    signals.Mutation.Set();
                     RecoveryRecord record = storage.Read();
                     if (record == null || record.Id != id || record.Phase != expected
                         || signals.Cancelled || helper.HasExited) throw new IOException();
@@ -369,8 +380,8 @@ namespace AgentSleep
                 }
                 finally
                 {
-                    signals.Mutation.Reset();
-                    gate.ReleaseMutex();
+                    try { signals.Mutation.Reset(); }
+                    finally { gate.ReleaseMutex(); }
                 }
             }
         }
@@ -426,7 +437,8 @@ namespace AgentSleep
             try
             {
                 RecoveryRecord record = storage.Read();
-                if (record == null && Pending && Volatile.Read(ref queued) == 0 && Volatile.Read(ref queueFinished) == 1)
+                if ((record == null || record.Id != id) && Pending && Volatile.Read(ref queued) == 0
+                    && Volatile.Read(ref queueFinished) == QueuedSuccess)
                 {
                     Pending = false;
                     Set("restored", "restore-exact");
@@ -461,7 +473,7 @@ namespace AgentSleep
                 catch (Exception) { }
                 finally
                 {
-                    Interlocked.Exchange(ref queueFinished, outcome == 0 ? 1 : outcome);
+                    Interlocked.Exchange(ref queueFinished, outcome == 0 ? QueuedSuccess : outcome);
                     Interlocked.Exchange(ref queued, 0);
                 }
             });
@@ -523,6 +535,7 @@ namespace AgentSleep
                     if (!RecoveryWorker.Enter(gate, 0)) return;
                     try
                     {
+                        storage.RemoveInterruptedWrite();
                         RecoveryRecord record = storage.Read();
                         if (record != null && (expectedId == Guid.Empty || expectedId == record.Id))
                             storage.RemoveReceipt(record, onlyIfOwnerExited);
@@ -542,7 +555,7 @@ namespace AgentSleep
         {
             if (disposed) return;
             if (Pending && ownsRecord) Restore();
-            if (ownsRecord) CleanupReceipt(id, false);
+            if (ownsRecord && id != Guid.Empty) CleanupReceipt(id, false);
             CloseHandles();
             disposed = true;
         }
@@ -550,6 +563,22 @@ namespace AgentSleep
 
     internal static class RecoveryCommands
     {
+        private sealed class WatchdogPower : IDisposable
+        {
+            private const uint Continuous = 0x80000000;
+            private const uint SystemRequired = 0x00000001;
+
+            [DllImport("kernel32.dll")]
+            private static extern uint SetThreadExecutionState(uint flags);
+
+            internal static IDisposable Acquire()
+            {
+                return SetThreadExecutionState(Continuous | SystemRequired) == 0 ? null : new WatchdogPower();
+            }
+
+            public void Dispose() { SetThreadExecutionState(Continuous); }
+        }
+
         internal static Process Launch(Guid id)
         {
             using (var process = Process.GetCurrentProcess())
@@ -575,7 +604,11 @@ namespace AgentSleep
             Guid id;
             if (args.Length == 2 && Guid.TryParseExact(args[1], "N", out id))
             {
-                try { exitCode = RecoveryWorker.Watch(RecoveryStorage.Open(), new NativeDisplays(), id, RecoveryWorker.TrialMilliseconds); }
+                try
+                {
+                    exitCode = RecoveryWorker.Watch(RecoveryStorage.Open(), new NativeDisplays(), id,
+                        WatchdogPower.Acquire, RecoveryWorker.TrialMilliseconds);
+                }
                 catch (Exception) { }
             }
             return true;

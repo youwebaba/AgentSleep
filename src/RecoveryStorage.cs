@@ -73,8 +73,9 @@ namespace AgentSleep
             using (var owner = Process.GetCurrentProcess())
             {
                 RecoveryLogon logon = RecoveryLogon.Read(identity.Token, owner.SessionId);
-                string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "AgentSleep", "Recovery");
+                string localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (String.IsNullOrWhiteSpace(localData)) throw new IOException("recovery-local-data");
+                string path = Path.Combine(localData, "AgentSleep", "Recovery");
                 return new RecoveryStorage(path, "", logon.Id, logon.Time, identity.User, owner.SessionId);
             }
         }
@@ -141,13 +142,14 @@ namespace AgentSleep
                     OwnerPid = reader.ReadInt32(),
                     OwnerStart = reader.ReadInt64(),
                     Revision = reader.ReadInt32(),
-                    Timed = reader.ReadBoolean(),
-                    Phase = (RecoveryPhase)reader.ReadByte(),
-                    Reason = (RecoveryReason)reader.ReadByte()
                 };
+                byte timed = reader.ReadByte();
+                record.Timed = timed == 1;
+                record.Phase = (RecoveryPhase)reader.ReadByte();
+                record.Reason = (RecoveryReason)reader.ReadByte();
                 int baselineLength = reader.ReadInt32();
                 bool terminal = record.Phase == RecoveryPhase.Complete || record.Phase == RecoveryPhase.Aborted;
-                if (record.Id == Guid.Empty || record.OwnerPid <= 0 || record.OwnerStart <= 0 || record.Revision < 1
+                if (record.Id == Guid.Empty || record.OwnerPid <= 0 || record.OwnerStart <= 0 || record.Revision < 1 || timed > 1
                     || !Enum.IsDefined(typeof(RecoveryPhase), record.Phase)
                     || !Enum.IsDefined(typeof(RecoveryReason), record.Reason)
                     || baselineLength < 0 || baselineLength > MaxBaseline || terminal != (baselineLength == 0)
@@ -210,6 +212,13 @@ namespace AgentSleep
                 using (var owner = onlyIfOwnerExited ? RecoveryOwner.Open(ownerPid, ownerStart, Session) : null)
                     if (owner == null || owner.Exited) File.Delete(JournalPath);
             }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        internal void RemoveInterruptedWrite()
+        {
+            try { File.Delete(JournalPath + ".tmp"); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }
@@ -404,12 +413,16 @@ namespace AgentSleep
 
         internal void Stop()
         {
-            using (var current = Process.GetCurrentProcess())
-            using (var ownImage = new RecoveryOwner(current.Id))
-                if (!String.Equals(Image(), ownImage.Image(), StringComparison.OrdinalIgnoreCase))
-                    throw new IOException("recovery-owner-image");
+            if (!MatchesCurrentImage()) throw new IOException("recovery-owner-image");
             if (!Exited && !TerminateProcess(handle, 2) && !Exited) throw new IOException("recovery-owner-stop");
             if (WaitForSingleObject(handle, 3000) != 0) throw new IOException("recovery-owner-wait");
+        }
+
+        internal bool MatchesCurrentImage()
+        {
+            using (var current = Process.GetCurrentProcess())
+            using (var ownImage = new RecoveryOwner(current.Id))
+                return String.Equals(Image(), ownImage.Image(), StringComparison.OrdinalIgnoreCase);
         }
 
         private string Image()

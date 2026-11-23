@@ -115,18 +115,40 @@ namespace AgentSleep
                 }
             }
 
+            var attempted = new HashSet<string>();
+            while (attempted.Count < 8)
+            {
+                if (DisplayLayout.Exact(saved, current.Layouts)) return "exact";
+                if (HasUsablePhysicalDesktop(current)) return "physical-fallback";
+                Plan fallback = FindPhysicalPlan(current, saved, attempted);
+                if (fallback == null) break;
+                attempted.Add(fallback.Routes[0].Id);
+                try
+                {
+                    Apply(fallback, current, "bring back a connected physical display");
+                    State verified = WaitFor(HasUsablePhysicalDesktop);
+                    return DisplayLayout.Exact(saved, verified.Layouts) ? "exact" : "physical-fallback";
+                }
+                catch (InvalidOperationException)
+                {
+                    current = Read(true);
+                }
+            }
+            if (DisplayLayout.Exact(saved, current.Layouts)) return "exact";
             if (HasUsablePhysicalDesktop(current)) return "physical-fallback";
-            foreach (Route route in PhysicalFallbacks(current, saved))
+            throw new InvalidOperationException("Windows could not restore the saved layout or validate a connected physical display. Wake or reconnect a monitor and retry Restore.");
+        }
+
+        private static Plan FindPhysicalPlan(State current, DisplayLayout[] saved, HashSet<string> attempted)
+        {
+            foreach (Route route in PhysicalFallbacks(current.Routes, saved, attempted).Take(128))
             {
                 Plan fallback;
                 try { fallback = SingleAtOrigin(route, route.Layout); }
                 catch (InvalidOperationException) { continue; }
-                if (fallback.Set(false) != 0) continue;
-                Apply(fallback, current, "bring back a connected physical display");
-                WaitFor(s => IsOnly(s, route.Id, DisplayKind.Physical));
-                return "physical-fallback";
+                if (fallback.Set(false) == 0) return fallback;
             }
-            throw new InvalidOperationException("Windows could not restore the saved layout or validate a connected physical display. Wake or reconnect a monitor and retry Restore.");
+            return null;
         }
 
         private static Plan PrepareEntry(State current, DisplayLayout[] saved, string id)
@@ -218,14 +240,15 @@ namespace AgentSleep
                 s.Layouts.All(l => l != null) && s.Layouts.Any(l => l.Origin);
         }
 
-        private static IEnumerable<Route> PhysicalFallbacks(State s, DisplayLayout[] saved)
+        internal static IEnumerable<Route> PhysicalFallbacks(Route[] routes, DisplayLayout[] saved, HashSet<string> attempted)
         {
             var original = new HashSet<string>(saved.Where(l => l.Kind == DisplayKind.Physical).Select(l => l.Id));
             string primary = saved.Single(l => l.Origin).Id;
-            return s.Routes.Where(r => r.Available && r.Kind == DisplayKind.Physical && r.Id != null)
-                .GroupBy(r => r.Id).Where(g => g.Select(r => r.Path.Target.Key).Distinct().Count() == 1)
+            return routes.Where(r => r.Id != null && !attempted.Contains(r.Id)).GroupBy(r => r.Id)
+                .Where(g => g.Select(r => r.Path.Target.Key).Distinct().Count() == 1)
                 .OrderByDescending(g => g.Key == primary).ThenByDescending(g => original.Contains(g.Key))
-                .ThenByDescending(g => g.Any(r => r.Path.IsActive)).SelectMany(g => g);
+                .ThenByDescending(g => g.Any(r => r.Path.IsActive)).SelectMany(g => g)
+                .Where(r => r.Available && r.Kind == DisplayKind.Physical);
         }
 
         private static bool SeparateSources(State current)

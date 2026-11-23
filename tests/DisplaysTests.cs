@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
@@ -9,6 +10,9 @@ namespace AgentSleep
         internal static void Run()
         {
             Ccd.CheckAbi();
+#if DRY_RUN_ONLY
+            VerifyDryRunGuard();
+#endif
             var original = new[] { Layout('A', 0, 0), Layout('B', 2560, 0), Layout('C', -2560, 1) };
             byte[] baseline = DisplayBaseline.Encode(original);
             DisplayLayout[] decoded = DisplayBaseline.Decode(baseline);
@@ -60,6 +64,16 @@ namespace AgentSleep
             var summaries = NativeDisplays.Summarize(new[] { route, conflict, noId });
             Require(summaries.Length == 3 && summaries.All(d => d.Active && d.Id == null && !d.IsVirtual && !d.IsPhysical),
                 "unclassified active targets remain visible without selectable identities");
+            var alternate = Route(original[1], 64, 11, 204);
+            var unknown = Route(original[2], 64, 9, 205);
+            unknown.Kind = DisplayKind.Unknown;
+            var attempted = new HashSet<string>();
+            var physical = new[] { unknown, replacement, alternate, route };
+            Require(NativeDisplays.PhysicalFallbacks(physical, original, attempted).First() == route,
+                "physical fallback prefers the saved primary");
+            attempted.Add(route.Id);
+            Require(NativeDisplays.PhysicalFallbacks(physical, original, attempted).SequenceEqual(new[] { alternate, replacement }),
+                "physical fallback skips a failed panel, tries another original, and refuses unknown outputs");
 
             Require(DisplayTrust.IsApprovedHardware(@"ROOT\MTTVDD") && DisplayTrust.IsApprovedHardware("MttVDD") &&
                 !DisplayTrust.IsApprovedHardware(@"ROOT\MTTVDD_EXTRA"), "exact VDD hardware allowlist");
@@ -80,6 +94,16 @@ namespace AgentSleep
             Require(id == DisplayTrust.StableId("adapter-interface", monitor) &&
                 id != DisplayTrust.StableId("different-adapter", monitor), "identity comes from both device interfaces");
         }
+
+#if DRY_RUN_ONLY
+        private static void VerifyDryRunGuard()
+        {
+            // Null buffers keep this regression test from reaching user32 even if the guard is removed.
+            try { Ccd.Set(null, null, true); }
+            catch (NotSupportedException) { return; }
+            throw new Exception("The read-only build did not reject display apply.");
+        }
+#endif
 
         private static DisplayLayout Layout(char key, int x, int y)
         {

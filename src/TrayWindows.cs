@@ -61,6 +61,8 @@ namespace AgentSleep
         private const int PowerBroadcast = 0x0218;
         private const int SessionChange = 0x02B1;
         private const int HotkeyMessage = 0x0312;
+        private const int PromptMessage = 0x8031;
+        private const string Caption = "AgentSleep notifications";
         private const uint NoRepeat = 0x4000;
         private const uint Continuous = 0x80000000;
         private const uint SystemAndDisplay = 0x00000003;
@@ -73,6 +75,7 @@ namespace AgentSleep
         private bool executionRequired;
 
         internal Action Hotkey;
+        internal Action<PromptMode> Prompt;
         internal Action DisplayChanged;
         internal Action Interrupted;
         internal Action Resumed;
@@ -86,8 +89,14 @@ namespace AgentSleep
 
         internal TrayWindow()
         {
-            CreateHandle(new CreateParams { Caption = "AgentSleep notifications" });
+            CreateHandle(new CreateParams { Caption = Caption });
             TryEnableSessionNotifications();
+        }
+
+        internal static bool RequestPrompt(PromptMode mode)
+        {
+            IntPtr window = FindWindow(null, Caption);
+            return window != IntPtr.Zero && PostMessage(window, PromptMessage, new IntPtr((int)mode), IntPtr.Zero);
         }
 
         internal void TryEnableSessionNotifications()
@@ -152,6 +161,8 @@ namespace AgentSleep
         {
             int reason = unchecked((int)message.WParam.ToInt64());
             if (message.Msg == HotkeyMessage && HotkeyRegistered && reason == shortcutId && Hotkey != null) Hotkey();
+            if (message.Msg == PromptMessage && reason >= (int)PromptMode.General && reason <= (int)PromptMode.TrayLoss && Prompt != null)
+                Prompt((PromptMode)reason);
             if (message.Msg == DisplayChange && DisplayChanged != null) DisplayChanged();
             if (message.Msg == PowerBroadcast)
             {
@@ -205,6 +216,8 @@ namespace AgentSleep
         private struct LastInputInfo { internal uint Size, Tick; }
 
         [DllImport("user32.dll")] private static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint key);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string className, string title);
+        [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hwnd, int message, IntPtr wparam, IntPtr lparam);
         [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr hwnd, int id);
         [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
         [DllImport("user32.dll")] private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);

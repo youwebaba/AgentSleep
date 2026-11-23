@@ -24,6 +24,8 @@ To build from source and run the mocked display and recovery tests, use a Window
 
 After reviewing the dry run, open [AgentSleep.exe](builds/windows-x64/AgentSleep.exe). **Start now** begins manual setup. The first session for a target requires local confirmation and a timed rollback. **Restore displays**, the restore hotkey and the independent watchdog all bring the physical monitors back first, verify their layout, then disconnect the selected virtual display. The driver stays installed. Startup with Windows and idle entry both default to off.
 
+To open **Start now** on your primary screen, run `AgentSleep.exe --prompt`. Opening the prompt leaves the displays as they are until you choose **Start now**. Escape cancels.
+
 To build the tray app and run all native-project tests from the repository root, use PowerShell. The executable is `build\AgentSleep.exe`. The build needs no NuGet packages or .NET SDK.
 
 ```powershell

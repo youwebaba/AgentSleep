@@ -7,6 +7,7 @@ namespace AgentSleep
     {
         internal static void Run()
         {
+            CheckPrompts();
             var idle = new IdleClock();
             idle.Reset(0);
             Check(!idle.IsDue(400000, 100000, 0, 360000), "first idle sample");
@@ -57,6 +58,40 @@ namespace AgentSleep
             Check(BrowserInventory.IsReachable(screen, area, screen), "fullscreen browser over the taskbar");
             var primary = new Rectangle(0, 0, 1920, 1040);
             Check(!BrowserInventory.IsReachable(new Rectangle(1600, 10, 1000, 900), primary, primary), "mostly hidden on the primary screen");
+        }
+
+        private static void CheckPrompts()
+        {
+            PromptMode mode;
+            Check(TrayPrompt.TryParse(new[] { "--prompt" }, out mode) && mode == PromptMode.General, "generic prompt entry");
+            Check(TrayPrompt.TryParse(new[] { "--prompt", "hotkey" }, out mode) && mode == PromptMode.Hotkey, "hotkey prompt entry");
+            Check(TrayPrompt.TryParse(new[] { "--prompt", "standalone" }, out mode) && mode == PromptMode.Standalone, "standalone prompt entry");
+            Check(TrayPrompt.TryParse(new[] { "--prompt", "tray-loss" }, out mode) && mode == PromptMode.TrayLoss, "tray-loss prompt entry");
+            Check(!TrayPrompt.TryParse(new[] { "--prompt", "hotkey", "--start" }, out mode), "reject automatic start argument");
+            Check(!TrayPrompt.HasExpired(PromptMode.General, 80000) && !TrayPrompt.HasExpired(PromptMode.Hotkey, 79999) &&
+                TrayPrompt.HasExpired(PromptMode.Hotkey, 80000), "test prompts expire and generic prompts stay open");
+
+            int starts = 0;
+            Action accept = delegate { starts++; };
+            var work = new Rectangle(0, 0, 1920, 1040);
+            using (var prompt = new TrayPrompt(PromptMode.General, work, "Ctrl+Alt+F11", "", accept))
+            {
+                Check(prompt.TopMost && object.ReferenceEquals(prompt.AcceptButton, prompt.CancelButton), "foreground prompt defaults to Cancel");
+                prompt.Activate();
+                prompt.Activate();
+                Check(starts == 0, "re-presenting the same prompt does not start a session");
+                prompt.Choose(false);
+                Check(starts == 0, "Cancel has no start effect");
+            }
+            using (var prompt = new TrayPrompt(PromptMode.General, work, "Ctrl+Alt+F11", "Target unavailable.", accept))
+                prompt.Choose(true);
+            Check(starts == 0, "unavailable target cannot start from the prompt");
+            using (var prompt = new TrayPrompt(PromptMode.General, work, "Ctrl+Alt+F11", "", accept))
+            {
+                prompt.Choose(true);
+                prompt.Choose(true);
+            }
+            Check(starts == 1, "affirmative action dispatches exactly once");
         }
 
         private static void Check(bool condition, string label)

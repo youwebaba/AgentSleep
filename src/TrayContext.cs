@@ -21,6 +21,7 @@ namespace AgentSleep
         private TraySettings settings;
         private bool paused;
         private bool dialogOpen;
+        private TrayPrompt startPrompt;
         private bool exitRequested;
         private bool restoreRequested;
         private bool powerFailed;
@@ -57,6 +58,7 @@ namespace AgentSleep
             window = new TrayWindow();
             window.TryRegister(settings.Modifiers, settings.Key);
             window.Hotkey = delegate { RequestRestore("Restore hotkey received."); };
+            window.Prompt = delegate(PromptMode mode) { ShowPrompt(mode); };
             window.Interrupted = delegate { Interrupt("Session locked, disconnected, or suspended."); };
             window.Resumed = ResetAfterInterruption;
             window.DisplayChanged = delegate { inventoryAfter = 0; };
@@ -200,6 +202,7 @@ namespace AgentSleep
 
         private void Interrupt(string reason)
         {
+            if (startPrompt != null) startPrompt.Close();
             resumeRestore.Interrupt(recovery.Pending);
             ResetAfterInterruption();
             if (!restoreRequested && recovery.Pending) RequestRestore(reason);
@@ -257,6 +260,50 @@ namespace AgentSleep
         private bool HasRestoreHotkey()
         {
             return window.HasHotkey(settings.Modifiers, settings.Key);
+        }
+
+        internal bool ShowPrompt(PromptMode mode)
+        {
+            if (!window.IsLocalDesktop() || recovery.Pending || qualifyingTrial || exitRequested) return false;
+            if (startPrompt != null) { startPrompt.Activate(); return true; }
+            if (dialogOpen) return false;
+
+            Screen screen = Screen.PrimaryScreen;
+            if (screen == null || !VerifiedPhysicalPrimary(screen)) return false;
+            inventoryAfter = 0;
+            string problem = EligibilityError(true);
+            DisplayTarget selected = SelectForStart(inventory, settings.TargetId, true);
+            var prompt = new TrayPrompt(mode, screen.WorkingArea, settings.Shortcut, problem, delegate
+            {
+                if (!window.IsLocalDesktop() || recovery.Pending || qualifyingTrial || exitRequested) return;
+                inventoryAfter = 0;
+                string latest = EligibilityError(true);
+                DisplayTarget current = SelectForStart(inventory, settings.TargetId, true);
+                if (latest != "") { ShowMessage(latest); return; }
+                if (selected == null || current == null || !String.Equals(selected.Id, current.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    ShowMessage("The selected virtual display changed. Open the prompt again to review it.");
+                    return;
+                }
+                StartSession(false);
+            });
+            startPrompt = prompt;
+            dialogOpen = true;
+            prompt.FormClosed += delegate { startPrompt = null; dialogOpen = false; idle.Reset(clock.ElapsedMilliseconds); };
+            prompt.Show();
+            prompt.Activate();
+            return true;
+        }
+
+        private bool VerifiedPhysicalPrimary(Screen screen)
+        {
+            try
+            {
+                DisplayLayout layout = DisplayBaseline.Decode(displays.Capture()).Single(display => display.Origin);
+                Ccd.SourceMode mode = layout.Source;
+                return layout.Kind == DisplayKind.Physical && screen.Bounds == new Rectangle(mode.X, mode.Y, (int)mode.Width, (int)mode.Height);
+            }
+            catch (Exception) { return false; }
         }
 
         private void StartSession(bool automated)
@@ -547,6 +594,7 @@ namespace AgentSleep
         {
             if (disposing)
             {
+                if (startPrompt != null) startPrompt.Dispose();
                 timer.Dispose();
                 icon.Visible = false;
                 icon.Dispose();

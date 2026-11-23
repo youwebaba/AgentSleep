@@ -1,24 +1,29 @@
 # AgentSleep
 
-Keep your agents working with your monitors off.
+AgentSleep is a standalone Windows 11 utility for screen-based agents. Its goal is to let physical monitors enter standby while an unlocked Windows desktop stays available for screenshots, clicks and typing. Neither Faber nor a streaming service is required.
 
-AgentSleep is a planned standalone Windows utility for screen-based AI agents and desktop automation. The goal is to let every physical monitor turn fully off while Windows continues rendering an interactive desktop that a compatible agent can screenshot and click. No dimming, black overlay, or streaming service required.
+## Read-only build
 
-**Status:** Design stage. There is no installer or working release yet.
+Run [AgentSleep.DryRun.exe](builds/windows-x64/AgentSleep.DryRun.exe) from PowerShell on the local Windows desktop. The executable can inspect and validate a proposed display configuration. It has no command for applying one.
 
-## How it would work
+```powershell
+.\builds\windows-x64\AgentSleep.DryRun.exe
+```
 
-1. Save the current physical display layout.
-2. Switch Windows to an active virtual display. The physical monitors can then enter standby or be switched off without removing the agent's working display.
-3. Restore the physical layout on demand or when the session timer expires.
+Inventory reports active physical displays and available verified virtual targets. It asks Windows to validate reconstruction of the current physical layout even when no virtual target is installed. When a supported target is present, copy its full ID from inventory and pass it with `--target` to validate the proposed topology. The ID identifies a device independently of Windows’ monitor numbering. Treat discovery details as local equipment information. An inventory exit code of `0` means the check ran. Read its prerequisite and validation results before attempting a trial.
 
-The first prototype will test an existing [virtual display driver](https://github.com/VirtualDrivers/Virtual-Display-Driver), rather than write a new one. AgentSleep will not require Faber or any specific agent. It will not unlock Windows, bypass security policy, or make a sleeping PC available for desktop automation. Turning off the panels does not secure an unlocked session.
+To build from source and run the mocked display and recovery tests, use a Windows 11 x64 checkout with the inbox .NET Framework C# compiler. Build output goes into `build`.
 
-## First milestone
+```powershell
+.\build.ps1 -DryRunOnly -Test
+```
 
-- On one Windows 11 PC, start with a harmless local page that visibly changes when a button is clicked.
-- Switch to the virtual display and physically turn off every monitor.
-- Have the target agent take a fresh screenshot, click the button, and verify the change in a second screenshot.
-- Confirm the original monitor layout comes back with the restore hotkey and after a timed rollback. Test recovery if the app exits unexpectedly.
+## Driver prerequisite
 
-Agent, capture method, GPU, and monitor compatibility are not yet verified.
+The switch requires an already-installed, enabled, supported signed indirect display driver with a virtual monitor available in the interactive session. AgentSleep recognizes the **VirtualDrivers Virtual Display Driver 25.7.23 driver-only package**. For x64 Windows the upstream asset is named `VirtualDisplayDriver-x86.Driver.Only.zip`. Keep Windows signature enforcement enabled. AgentSleep binds the monitor to its adapter and checks its registered device and the hashes of the known signed package. This driver can report its connector as HDMI. Other driver versions and indirect USB monitors require separate verification. [Upstream signed package](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/tag/25.7.23) · [Driver source](https://github.com/VirtualDrivers/Virtual-Display-Driver/blob/25.7.23/Virtual%20Display%20Driver%20%28HDR%29/MttVDD/Driver.cpp)
+
+The original Python discovery tool and its tests remain under [prototype](prototype/README.md). It is useful for inspecting raw Windows paths. The native build checks the installed driver before identifying a virtual target.
+
+## Hardware check
+
+On the three-monitor Windows 11 PC, the native build reported three active physical targets and zero verified virtual targets. Windows accepted a read-only validation of the reconstructed physical topology. The reported browser interactions that took effect after panel wake and the separate successful screenshot motivate the controlled test. Physical standby, live browser input in darkness and exact recovery on this hardware await an attended trial.

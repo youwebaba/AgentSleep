@@ -26,8 +26,10 @@ After the automatic rollback, compare the original primary, all three physical t
 
 | Condition | Run ID | Clock before / after | Click received UTC | Text matched UTC | All dark from / until UTC | Standby / wake observation | Original layout and primary |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Panels on | Pending | — | — | — | N/A | — | — |
-| Windows idle-off | Pending | — | — | — | — | — | — |
+| Panels on | `2EDB80454515AD82` | 23:10:31.160 / 23:11:10.148 | 23:10:35.933 | 23:11:10.056 | N/A | Operator confirmed all three panels stayed on | Original physical layout recorded before driver installation |
+| Windows idle-off, first observation | Fixture still on baseline run | 23:18:46.958 on both off-state captures | No new counter event | No new match | Windows reported off at 23:18:47.005. Physical times unrecorded. | Operator saw all three dark. The agent could not activate Edge before or during this interval. | All three identities, modes, positions and primary matched afterward |
 | AgentSleep virtual-only | Pending | — | — | — | — | — | — |
 
-Fill the table from the supervised session. Keep any screenshots or private run notes outside the repository. One agent/browser/capture combination only establishes a result for that combination.
+The November 23, 2026 baseline used Codex Windows Computer Use with Windows.Graphics.Capture and desktop input in a headed Microsoft Edge window. The counter advanced from zero to one and the fresh screenshot showed the exact challenge match. Times in the table are UTC. Keep screenshots and private run notes outside the repository. One agent/browser/capture combination establishes a result for that combination.
+
+For the first idle-off observation, AgentSleep was closed. An independent guard acknowledged readiness, then the AC display timeout changed from Never to 60 seconds. Windows reported off almost immediately because the desktop was already idle. The clock visible in both captures was the last frame before that notification. The agent reported “failed to activate captured window” with the panels on and again during idle-off. A fresh fixture run could not be started, so this interval supplies no click or text latency measurement. The guard restored the original timeout at 23:19:38.805 UTC. Both AC and DC read back as Never. A separate display-wake request brought the session display status back to on.

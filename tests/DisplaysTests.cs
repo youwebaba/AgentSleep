@@ -93,6 +93,134 @@ namespace AgentSleep
             monitor.DevicePath = monitor.DevicePath.ToLowerInvariant();
             Require(id == DisplayTrust.StableId("adapter-interface", monitor) &&
                 id != DisplayTrust.StableId("different-adapter", monitor), "identity comes from both device interfaces");
+
+            SelectedRestore(original);
+        }
+
+        private static void SelectedRestore(DisplayLayout[] physical)
+        {
+            DisplayLayout selected = Layout('E', 7680, 0);
+            selected.Kind = DisplayKind.Virtual;
+            DisplayLayout unrelated = Layout('D', 5120, 0);
+            unrelated.Kind = DisplayKind.Virtual;
+            var saved = physical.Concat(new[] { unrelated }).ToArray();
+            string selectedId;
+            DisplayBaseline.Decode(DisplayBaseline.Encode(saved), out selectedId);
+            Require(selectedId == null, "legacy baseline keeps its original exact restore semantics");
+            foreach (bool selectedWasActive in new[] { false, true })
+            {
+                DisplayLayout[] prior = selectedWasActive ? saved.Concat(new[] { selected }).ToArray() : saved;
+                DisplayLayout[] layouts = DisplayBaseline.Decode(DisplayBaseline.Encode(prior, selected.Id), out selectedId);
+                Require(selectedId == selected.Id && DisplayLayout.Exact(prior, layouts), "target binding round trip");
+                var added = Layout('F', 10240, 0);
+                var expected = saved.Concat(new[] { added }).ToArray();
+                var current = Observed(new[] { selected.AtPosition(0, 0), added });
+                int phases = 0;
+                bool settled = false;
+                string result = NativeDisplays.RestoreSelected(layouts, selectedId, () => current,
+                    (before, proposed, verify, action) =>
+                    {
+                        Require(before == current, "restore transitions use freshly read state");
+                        if (++phases == 1)
+                        {
+                            Require(DisplayLayout.Exact(expected, proposed.Where(l => l.Id != selectedId).ToArray()) &&
+                                proposed.Count(l => l.Id == selectedId && !l.Origin) == 1,
+                                "phase one restores original monitors and keeps the selected and unrelated outputs");
+                        }
+                        else
+                        {
+                            Require(settled && DisplayLayout.Exact(expected, proposed) &&
+                                before.Layouts.Any(l => l.Id == selectedId),
+                                "phase two detaches only the selected target after verified physical readback");
+                        }
+                        current = Observed(proposed);
+                        Require(verify(current), "phase readback predicate");
+                        return current;
+                    }, () => { settled = true; });
+                Require(result == "exact" && phases == 2 && DisplayLayout.Exact(expected, current.Layouts),
+                    "two-phase exact rollback from virtual-only with selected originally active or inactive");
+            }
+
+            Reject(() => DisplayBaseline.Encode(new[] { selected.AtPosition(0, 0), physical[1] }, selected.Id),
+                "selected virtual primary cannot be detached while preserving the original primary");
+            var otherPrimary = new[] { unrelated.AtPosition(0, 0), physical[1] };
+            Require(DisplayBaseline.Decode(DisplayBaseline.Encode(otherPrimary, selected.Id), out selectedId).Length == 2,
+                "unrelated primary remains allowed");
+            var alternatePrimary = Observed(new[] { selected.AtPosition(0, 0) });
+            Require(NativeDisplays.RestoreSelected(otherPrimary, selected.Id, () => alternatePrimary,
+                (before, proposed, verify, action) =>
+                {
+                    alternatePrimary = Observed(proposed);
+                    Require(verify(alternatePrimary), "unrelated primary and original physical monitor verified");
+                    return alternatePrimary;
+                }, () => { }) == "exact" && alternatePrimary.Layouts.Single(l => l.Origin).Id == unrelated.Id,
+                "two-stage restoration preserves a nonselected virtual primary");
+
+            var unavailable = Observed(new[] { selected.AtPosition(0, 0) });
+            int tried = 0;
+            try
+            {
+                NativeDisplays.RestoreSelected(saved, selected.Id, () => unavailable, (before, proposed, verify, action) =>
+                {
+                    tried++;
+                    Require(proposed.Any(l => l.Id == selected.Id) && !verify(unavailable),
+                        "no detach without physically available originals");
+                    return null;
+                }, () => { throw new Exception("Unverified physical phase must not reach detach."); });
+                throw new Exception("No physical output must leave rollback pending.");
+            }
+            catch (InvalidOperationException) { Require(tried == 1, "unavailable physical layout attempts bridge only"); }
+
+            var existing = Observed(saved.Concat(new[] { selected }).ToArray());
+            string fallback = NativeDisplays.RestoreSelected(saved, selected.Id, () => existing,
+                (before, proposed, verify, action) =>
+                {
+                    Require(DisplayLayout.Exact(saved, proposed), "detach attempts only the verified original layout");
+                    Require(!verify(existing), "failed removal cannot report exact success");
+                    return null;
+                }, () => { });
+            Require(fallback == "physical-fallback" && existing.Layouts.Any(l => l.Id == selected.Id),
+                "failed detach retains the active virtual alongside verified physical displays for retry");
+
+            NativeDisplays.State afterUnplug = existing;
+            fallback = NativeDisplays.RestoreSelected(saved, selected.Id, () => afterUnplug,
+                (before, proposed, verify, action) => { throw new Exception("Hot-unplug must abort detach."); },
+                () => { afterUnplug = Observed(new[] { physical[0], selected, unrelated }); });
+            Require(fallback == "physical-fallback", "fresh read fails closed after a monitor unplugs before detach");
+
+            var conflictingPrimary = Observed(new[] { Layout('F', 0, 0), selected });
+            Require(NativeDisplays.RestoreSelected(saved, selected.Id, () => conflictingPrimary,
+                (before, proposed, verify, action) => { throw new Exception("Conflicting new primary must remain active."); },
+                () => { }) == "physical-fallback", "unrelated output at the saved primary position causes safe fallback");
+
+            var alreadyNormal = Observed(saved);
+            Require(NativeDisplays.RestoreSelected(saved, selected.Id, () => alreadyNormal,
+                (before, proposed, verify, action) => { throw new Exception("Idempotent recovery must not switch."); },
+                () => { throw new Exception("No virtual target to detach."); }) == "exact",
+                "already inactive target is not reactivated");
+
+            var onlyPrimary = Observed(new[] { physical[0] });
+            Require(NativeDisplays.RestoreSelected(saved, selected.Id, () => onlyPrimary,
+                (before, proposed, verify, action) =>
+                {
+                    Require(DisplayLayout.Exact(saved, proposed), "inactive selected target is never reactivated for recovery");
+                    onlyPrimary = Observed(proposed);
+                    Require(verify(onlyPrimary), "readback after restoration without selected target");
+                    return onlyPrimary;
+                }, () => { throw new Exception("No virtual phase is needed if the target disappeared."); }) == "exact",
+                "restore missing originals directly if the selected target is already detached");
+        }
+
+        private static NativeDisplays.State Observed(DisplayLayout[] layouts)
+        {
+            return new NativeDisplays.State(layouts.Select(l =>
+            {
+                uint address = l.Id[0];
+                var route = Route(l, address, 1, 2);
+                route.Path.Flags |= Ccd.Active;
+                route.Layout = l;
+                return route;
+            }).ToArray());
         }
 
 #if DRY_RUN_ONLY

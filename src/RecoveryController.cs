@@ -289,7 +289,7 @@ namespace AgentSleep
                             storage.RemoveReceipt(previous, false);
                         ownsRecord = false;
                         id = Guid.Empty;
-                        byte[] baseline = displays.Capture();
+                        byte[] baseline = displays.Capture(targetId);
                         if (baseline == null || baseline.Length == 0) throw new IOException();
                         displays.Validate(baseline, targetId);
                         id = Guid.NewGuid();

@@ -20,11 +20,12 @@ namespace AgentSleep
 
         internal bool Origin { get { return Source.X == 0 && Source.Y == 0; } }
 
-        internal DisplayLayout AtOrigin()
+        internal DisplayLayout AtPosition(int x, int y)
         {
-            var centered = (DisplayLayout)MemberwiseClone();
-            centered.Source.X = centered.Source.Y = 0;
-            return centered;
+            var copy = (DisplayLayout)MemberwiseClone();
+            copy.Source.X = x;
+            copy.Source.Y = y;
+            return copy;
         }
 
         internal bool Same(DisplayLayout other)
@@ -48,7 +49,7 @@ namespace AgentSleep
 
     internal static class DisplayBaseline
     {
-        private const uint Magic = 0x31445341; // ASD1
+        private const uint MagicV1 = 0x31445341, MagicV2 = 0x32445341; // ASD1, ASD2
         private const int MaxDisplays = 32, MaxBytes = 65536;
 
         internal static bool Usable(Ccd.SourceMode source)
@@ -82,13 +83,15 @@ namespace AgentSleep
                 throw new InvalidDataException("The display layout needs a known physical screen and one unambiguous primary. Use separate, supported displays in Windows and retry.");
         }
 
-        internal static byte[] Encode(DisplayLayout[] records)
+        internal static byte[] Encode(DisplayLayout[] records, string selectedId = null)
         {
             Verify(records);
+            VerifySelected(records, selectedId);
             using (var buffer = new MemoryStream())
             using (var output = new BinaryWriter(buffer))
             {
-                output.Write(Magic);
+                output.Write(selectedId == null ? MagicV1 : MagicV2);
+                if (selectedId != null) output.Write(selectedId);
                 output.Write(records.Length);
                 foreach (DisplayLayout record in records)
                 {
@@ -116,24 +119,32 @@ namespace AgentSleep
 
         internal static DisplayLayout[] Decode(byte[] data)
         {
+            string selectedId;
+            return Decode(data, out selectedId);
+        }
+
+        internal static DisplayLayout[] Decode(byte[] data, out string selectedId)
+        {
+            selectedId = null;
             if (data == null || data.Length > MaxBytes)
                 throw new InvalidDataException("The saved Windows display layout is missing or invalid.");
             try
             {
                 using (var input = new BinaryReader(new MemoryStream(data, false)))
                 {
-                    if (input.ReadUInt32() != Magic)
+                    uint magic = input.ReadUInt32();
+                    if (magic != MagicV1 && magic != MagicV2)
                         throw new InvalidDataException("Unrecognized saved Windows display layout version.");
+                    if (magic == MagicV2) selectedId = ReadIdentity(input);
                     int count = input.ReadInt32();
                     if (count < 1 || count > MaxDisplays)
                         throw new InvalidDataException("Invalid saved display count.");
                     var records = new DisplayLayout[count];
                     for (int index = 0; index < count; index++)
                     {
-                        if (input.ReadByte() != 64) throw new InvalidDataException("Invalid saved display identity.");
                         var record = new DisplayLayout
                         {
-                            Id = System.Text.Encoding.ASCII.GetString(input.ReadBytes(64)),
+                            Id = ReadIdentity(input),
                             Kind = (DisplayKind)input.ReadByte(),
                             VirtualMode = ReadBoolean(input),
                             BoostRefresh = ReadBoolean(input),
@@ -154,6 +165,7 @@ namespace AgentSleep
                     if (input.BaseStream.Position != input.BaseStream.Length)
                         throw new InvalidDataException("Unexpected data in the saved Windows display layout.");
                     Verify(records);
+                    VerifySelected(records, selectedId);
                     return records;
                 }
             }
@@ -161,6 +173,24 @@ namespace AgentSleep
             {
                 throw new InvalidDataException("The saved Windows display layout is incomplete.");
             }
+        }
+
+        private static void VerifySelected(DisplayLayout[] records, string selectedId)
+        {
+            if (selectedId == null) return;
+            if (!Regex.IsMatch(selectedId, @"\A[0-9A-F]{64}\z") ||
+                records.Any(r => r.Id == selectedId && r.Kind != DisplayKind.Virtual))
+                throw new InvalidDataException("The saved selected virtual display identity is invalid.");
+            if (records.Any(r => r.Id == selectedId && r.Origin))
+                throw new InvalidDataException("Choose a different primary display in Windows before starting AgentSleep. The selected virtual display is detached after recovery.");
+        }
+
+        private static string ReadIdentity(BinaryReader input)
+        {
+            if (input.ReadByte() != 64) throw new InvalidDataException("Invalid saved display identity.");
+            byte[] bytes = input.ReadBytes(64);
+            if (bytes.Length != 64) throw new EndOfStreamException();
+            return System.Text.Encoding.ASCII.GetString(bytes);
         }
 
         private static bool ReadBoolean(BinaryReader input)

@@ -1,8 +1,8 @@
 # AgentSleep
 
-AgentSleep is a standalone Windows 11 utility for screen-based agents. Its goal is to let physical monitors enter standby while an unlocked Windows desktop stays available for screenshots, clicks and typing. Neither Faber nor a streaming service is required.
+AgentSleep is a standalone Windows 11 tray app for desktop agents. It moves the unlocked desktop onto a signed virtual display so physical monitors can enter standby while an agent continues taking screenshots, clicking and typing.
 
-**Start with the read-only build.** Windows validated the recovery plan on a three-monitor PC. The supported virtual driver is absent from that PC. Live input, panel standby and exact physical rollback await an attended trial.
+**Start with the read-only build.** On a three-monitor PC, all three physical panels stayed in standby while Codex clicked and typed in Edge. The first trial also showed why recovery must disconnect the virtual display after the physical monitors return. [Attended hardware results](docs/desktop-trial.md)
 
 ## Read-only build
 
@@ -22,7 +22,7 @@ To build from source and run the mocked display and recovery tests, use a Window
 
 ## Tray build
 
-After reviewing the dry run, open [AgentSleep.exe](builds/windows-x64/AgentSleep.exe). **Start now** begins manual setup. The first session for a target requires local confirmation and a timed rollback. **Restore displays** and the restore hotkey work independently of ordinary agent input. Startup with Windows and idle entry both default to off.
+After reviewing the dry run, open [AgentSleep.exe](builds/windows-x64/AgentSleep.exe). **Start now** begins manual setup. The first session for a target requires local confirmation and a timed rollback. **Restore displays**, the restore hotkey and the independent watchdog all bring the physical monitors back first, verify their layout, then disconnect the selected virtual display. The driver stays installed. Startup with Windows and idle entry both default to off.
 
 To build the tray app and run all native-project tests from the repository root, use PowerShell. The executable is `build\AgentSleep.exe`. The build needs no NuGet packages or .NET SDK.
 
@@ -51,7 +51,7 @@ The original Python discovery tool and its tests remain under [prototype](protot
 | Windows idle-off | **Click and exact text received in Edge.** The operator saw all three panels stay dark through typing. Windows reported the session display on 21 ms before the browser received the click. The pre-click capture showed the clock at the off notification. Both timeout values returned to Never. [Trial record](docs/desktop-trial.md) |
 | Signed driver and switch preflight | **Verified on hardware.** After the operator installed the supported driver, AgentSleep identified one active virtual target. Windows accepted the proposed virtual-only topology and the four-target rollback snapshot. The three original physical monitor identities, positions, modes and primary matched the pre-install baseline. |
 | AgentSleep virtual-only | **Passed on this PC with Codex and Edge.** The same Edge window on the 800 × 600 virtual desktop received a click and matched a fresh challenge. The agent captured an advancing clock and the result. The operator confirmed all three physical panels stayed dark with standby indicators throughout the inputs. [Trial record](docs/desktop-trial.md) |
-| First timed hardware recovery | **Display paths restored. Browser placement failed.** After 25 seconds the watchdog restored the three physical monitors, their modes, positions and original primary, plus the virtual target that had been active before the trial. The operator reported that Edge windows could not be reached on the physical desktop. |
+| First timed hardware recovery, earlier build | The watchdog restored the original physical layout and also reactivated the installer's fourth display. Edge was out of reach on the physical desktop. Disconnecting that virtual display left all three original physical monitors active and both Edge windows visible on physical screens. |
 | Keyboard-only restore, standalone recovery and loss of the tray process on hardware | Separate attended checks pending. |
 
 The previously reported clicks that appeared to take effect at wake, and a separate successful screenshot, are observations from before this build. The fixture records when the browser actually receives input so those timestamps can be compared with physical panel observations.

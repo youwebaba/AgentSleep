@@ -568,7 +568,7 @@ namespace AgentSleep
                 this.requireEntryPower = requireEntryPower;
             }
             public DisplayTarget[] Discover() { return displays.Discover(); }
-            public byte[] Capture() { return displays.Capture(); }
+            public byte[] Capture(string selectedId = null) { return displays.Capture(selectedId); }
             public void Validate(byte[] baseline, string id) { displays.Validate(baseline, id); }
             public bool IsOnly(string id) { return displays.IsOnly(id); }
             public string Restore(byte[] baseline) { return displays.Restore(baseline); }

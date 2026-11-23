@@ -25,6 +25,7 @@ namespace AgentSleep
                 if (displays == null) displays = new NativeDisplays();
                 DisplayTarget[] targets = displays.Discover();
                 DisplayTarget[] virtuals = targets.Where(IsVirtualCandidate).ToArray();
+                DisplayTarget selected = args.Length == 0 ? null : Select(virtuals, args[1]);
                 int physical = targets.Count(display => display.Active && display.IsPhysical && !display.IsVirtual);
                 int unknown = targets.Count(display => display.Active && display.IsPhysical == display.IsVirtual);
                 output.WriteLine("AgentSleep read-only display check");
@@ -39,7 +40,7 @@ namespace AgentSleep
                 {
                     if (physical == 0 || unknown != 0)
                         throw new InvalidOperationException("A classifiable active physical layout is required.");
-                    baseline = displays.Capture();
+                    baseline = displays.Capture(selected == null ? null : selected.Id);
                     output.WriteLine("Windows accepted read-only validation of the current layout as a rollback candidate.");
                 }
                 catch (Exception error)
@@ -58,7 +59,6 @@ namespace AgentSleep
                     return 0;
                 }
 
-                DisplayTarget selected = Select(virtuals, args[1]);
                 if (selected == null || baseline == null)
                 {
                     output.WriteLine("Validation requires one exact verified target and an active, classifiable physical layout.");

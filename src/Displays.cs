@@ -44,18 +44,19 @@ namespace AgentSleep
             return displays;
         }
 
-        public byte[] Capture()
+        public byte[] Capture(string selectedId = null)
         {
             State current = Read(true);
             DisplayLayout[] layouts = CaptureLayouts(current);
-            byte[] baseline = DisplayBaseline.Encode(layouts);
+            byte[] baseline = DisplayBaseline.Encode(layouts, selectedId);
+            if (selectedId != null) SelectVirtual(current, selectedId);
             ValidateCurrentRecovery(current, layouts);
             return baseline;
         }
 
         public void Validate(byte[] baseline, string id)
         {
-            DisplayLayout[] saved = DisplayBaseline.Decode(baseline);
+            DisplayLayout[] saved = EntryLayouts(baseline, id);
             State current = Read(true);
             PrepareEntry(current, saved, id);
         }
@@ -64,7 +65,7 @@ namespace AgentSleep
         {
             extended = null;
             extendedTarget = null;
-            DisplayLayout[] saved = DisplayBaseline.Decode(baseline);
+            DisplayLayout[] saved = EntryLayouts(baseline, id);
             State current = Read(true);
             Plan extension = PrepareEntry(current, saved, id);
             if (extension != null) Apply(extension, current, "extend the desktop to the virtual display");
@@ -95,7 +96,11 @@ namespace AgentSleep
         {
             extended = null;
             extendedTarget = null;
-            DisplayLayout[] saved = DisplayBaseline.Decode(baseline);
+            string selectedId;
+            DisplayLayout[] saved = DisplayBaseline.Decode(baseline, out selectedId);
+            if (selectedId != null)
+                return RestoreSelected(saved, selectedId, () => Read(true), SwitchAndVerify, () => Thread.Sleep(350));
+
             State current = Read(true);
             if (DisplayLayout.Exact(saved, current.Layouts)) return "exact";
 
@@ -139,6 +144,117 @@ namespace AgentSleep
             throw new InvalidOperationException("Windows could not restore the saved layout or validate a connected physical display. Wake or reconnect a monitor and retry Restore.");
         }
 
+        private static DisplayLayout[] EntryLayouts(byte[] baseline, string id)
+        {
+            string boundId;
+            DisplayLayout[] layouts = DisplayBaseline.Decode(baseline, out boundId);
+            if (boundId != null && boundId != id)
+                throw new InvalidOperationException("The saved layout belongs to a different virtual display.");
+            return layouts;
+        }
+
+        internal static string RestoreSelected(DisplayLayout[] saved, string selectedId, Func<State> read,
+            Func<State, DisplayLayout[], Func<State, bool>, string, State> change, Action settle)
+        {
+            State current = read();
+            DisplayLayout[] live = CaptureLayouts(current);
+            DisplayLayout[] final = saved.Where(l => l.Id != selectedId)
+                .Concat(live.Where(l => l.Id != selectedId && !saved.Any(s => s.Id == l.Id))).ToArray();
+            if (final.GroupBy(l => new { l.Source.X, l.Source.Y }).Any(g => g.Count() != 1))
+                return RestoreAlongsideFallback(current, saved, read, change);
+            if (DisplayLayout.Exact(final, live)) return "exact";
+
+            if (current.Active.Any(r => r.Id == selectedId))
+            {
+                Route target = SelectVirtual(current, selectedId).Single(r => r.Path.IsActive);
+                if (!ReadyToDetach(current, final, selectedId))
+                {
+                    Ccd.SourceMode anchor = Rightmost(final);
+                    DisplayLayout relocated = target.Layout.AtPosition(checked(anchor.X + (int)anchor.Width), anchor.Y);
+                    DisplayLayout[] bridge = final.Concat(new[] { relocated }).ToArray();
+                    current = change(current, bridge, s => ReadyToDetach(s, final, selectedId),
+                        "restore the saved desktop alongside the virtual display") ?? read();
+                    if (!ReadyToDetach(current, final, selectedId))
+                        return RestoreAlongsideFallback(current, saved, read, change);
+                }
+
+                // Give Windows a chance to process the expansion before it receives the detach.
+                settle();
+                current = read();
+                if (NormalRestored(current, final)) return "exact";
+                if (!ReadyToDetach(current, final, selectedId))
+                    return RestoreAlongsideFallback(current, saved, read, change);
+                SelectVirtual(current, selectedId);
+            }
+
+            if (change(current, final, s => NormalRestored(s, final),
+                "finish restoring the saved desktop with the selected virtual display detached") != null) return "exact";
+            current = read();
+            if (NormalRestored(current, final)) return "exact";
+            return RestoreAlongsideFallback(current, saved, read, change);
+        }
+
+        private static bool NormalRestored(State state, DisplayLayout[] expected)
+        {
+            return SeparateSources(state) && DisplayLayout.Exact(expected, state.Layouts);
+        }
+
+        private static bool ReadyToDetach(State state, DisplayLayout[] expected, string selectedId)
+        {
+            return SeparateSources(state) &&
+                state.Layouts.Count(l => l != null && l.Id == selectedId && l.Kind == DisplayKind.Virtual && !l.Origin) == 1 &&
+                state.Layouts.Any(l => l != null && l.Kind == DisplayKind.Physical) &&
+                DisplayLayout.Exact(expected, state.Layouts.Where(l => l == null || l.Id != selectedId).ToArray());
+        }
+
+        private static State SwitchAndVerify(State before, DisplayLayout[] proposed, Func<State, bool> verify, string action)
+        {
+            Plan plan = FindExactPlan(before, proposed);
+            if (plan == null) return null;
+            try
+            {
+                Apply(plan, before, action);
+                return WaitFor(verify);
+            }
+            catch (InvalidOperationException) { return null; }
+        }
+
+        private static string RestoreAlongsideFallback(State current, DisplayLayout[] saved, Func<State> read,
+            Func<State, DisplayLayout[], Func<State, bool>, string, State> change)
+        {
+            var attempted = new HashSet<string>();
+            while (attempted.Count < 8)
+            {
+                if (current.Layouts.Any(l => l != null && l.Kind == DisplayKind.Physical)) return "physical-fallback";
+                DisplayLayout[] keep = CaptureLayouts(current);
+                Route route = PhysicalFallbacks(current.Routes, saved, attempted).FirstOrDefault();
+                if (route == null) break;
+                attempted.Add(route.Id);
+                Ccd.SourceMode source;
+                try
+                {
+                    Ccd.SourceMode anchor = keep.Length == 0 ? default(Ccd.SourceMode) : Rightmost(keep);
+                    source = Ccd.GetPreferred(route.Path.Target.Key, checked(anchor.X + (int)anchor.Width), anchor.Y);
+                }
+                catch (InvalidOperationException) { continue; }
+                if (!DisplayBaseline.Usable(source)) continue;
+                DisplayLayout[] plan = keep.Concat(new[] { Preferred(route, source) }).ToArray();
+                State verified = change(current, plan, s =>
+                    s.Layouts.Count(l => l != null && l.Id == route.Id && l.Kind == DisplayKind.Physical) == 1 &&
+                    DisplayLayout.Exact(keep, s.Layouts.Where(l => l == null || l.Id != route.Id).ToArray()),
+                    "bring back a connected physical display alongside the existing desktop");
+                if (verified != null) return "physical-fallback";
+                current = read();
+            }
+            if (current.Layouts.Any(l => l != null && l.Kind == DisplayKind.Physical)) return "physical-fallback";
+            throw new InvalidOperationException("Windows could not restore the original physical layout while keeping the existing desktop active. Wake or reconnect a physical monitor and retry Restore.");
+        }
+
+        private static Ccd.SourceMode Rightmost(DisplayLayout[] layouts)
+        {
+            return layouts.OrderByDescending(l => l.Source.X + (long)l.Source.Width).First().Source;
+        }
+
         private static Plan FindPhysicalPlan(State current, DisplayLayout[] saved, HashSet<string> attempted)
         {
             foreach (Route route in PhysicalFallbacks(current.Routes, saved, attempted).Take(128))
@@ -155,16 +271,21 @@ namespace AgentSleep
         {
             if (!DisplayLayout.Exact(saved, CaptureLayouts(current)))
                 throw new InvalidOperationException("The saved display layout no longer matches the desktop. Start a new AgentSleep session.");
+            if (saved.Any(l => l.Id == id && l.Origin))
+                throw new InvalidOperationException("Choose a different primary display in Windows before starting AgentSleep. The selected virtual display is detached after recovery.");
             Route[] candidates = SelectVirtual(current, id);
             Route active = candidates.SingleOrDefault(r => r.Path.IsActive);
             ValidateCurrentRecovery(current, current.Layouts);
             if (active != null)
             {
+                Route[] normal = current.Active.Where(r => r.Id != id).ToArray();
+                Ccd.Check(Build(normal, normal.Select(r => r.Layout).ToArray()).Set(false),
+                    "validate detaching the virtual display after the saved physical desktop returns");
                 Ccd.Check(SingleAtOrigin(active, active.Layout).Set(false), "validate the virtual-only desktop");
                 return null;
             }
 
-            var anchor = current.Layouts.OrderByDescending(l => l.Source.X + (long)l.Source.Width).First().Source;
+            var anchor = Rightmost(current.Layouts);
             var size = Ccd.GetPreferred(candidates[0].Path.Target.Key, checked(anchor.X + (int)anchor.Width), anchor.Y);
             if (!DisplayBaseline.Usable(size))
                 throw new InvalidOperationException("Windows reported an unusable preferred mode for the virtual display.");
@@ -193,7 +314,7 @@ namespace AgentSleep
             DisplayLayout layout;
             if (existing != null)
             {
-                layout = existing.AtOrigin();
+                layout = existing.AtPosition(0, 0);
             }
             else
             {
@@ -452,7 +573,7 @@ namespace AgentSleep
             { get { return Tuple.Create(Id, Kind, Path.Source.Key, Path.Target.Key, Path.HasVirtualMode, Path.Target.Technology); } }
         }
 
-        private sealed class State
+        internal sealed class State
         {
             internal readonly Route[] Routes, Active;
             internal readonly DisplayLayout[] Layouts;

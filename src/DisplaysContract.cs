@@ -9,7 +9,7 @@ namespace AgentSleep
     internal interface IDisplays
     {
         DisplayTarget[] Discover();
-        byte[] Capture();
+        byte[] Capture(string selectedId = null);
         void Validate(byte[] baseline, string id);
         void Extend(byte[] baseline, string id);
         void Isolate(string id);

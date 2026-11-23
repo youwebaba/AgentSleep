@@ -461,16 +461,16 @@ namespace AgentSleep
             private void Topology(string topology) { File.WriteAllText(FilePath("topology"), topology); }
 
             public DisplayTarget[] Discover() { return new DisplayTarget[0]; }
-            public byte[] Capture()
+            public byte[] Capture(string selectedId = null)
             {
                 Record("capture");
-                return new byte[] { 42 };
+                return new byte[] { 42, selectedId == Target ? (byte)1 : (byte)0 };
             }
 
             public void Validate(byte[] baseline, string id)
             {
                 Record("validate");
-                Check(id == Target && !Has("missing") && baseline[0] == 42, "invalid target");
+                Check(id == Target && !Has("missing") && HasSelectedTarget(baseline), "invalid target");
             }
 
             public void Extend(byte[] baseline, string id)
@@ -506,7 +506,7 @@ namespace AgentSleep
             {
                 CheckWakeRequest();
                 Record("restore");
-                Check(baseline.Length == 1 && baseline[0] == 42 && !Has("restore-fails"), "invalid restore");
+                Check(HasSelectedTarget(baseline) && !Has("restore-fails"), "invalid or unbound restore snapshot");
                 Topology("physical");
                 return Has("fallback") ? "physical-fallback" : "exact";
             }
@@ -515,6 +515,11 @@ namespace AgentSleep
             {
                 if (Has("require-wake"))
                     Check(Has("wake-acquired") && !Has("wake-released"), "watchdog lacked its system request during display work");
+            }
+
+            private static bool HasSelectedTarget(byte[] baseline)
+            {
+                return baseline.Length == 2 && baseline[0] == 42 && baseline[1] == 1;
             }
         }
     }

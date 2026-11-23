@@ -4,6 +4,7 @@ namespace AgentSleep
 {
     internal static class TestProgram
     {
+        [STAThread]
         private static int Main(string[] args)
         {
             try

@@ -19,15 +19,35 @@ namespace AgentSleep
             catch (AbandonedMutexException) { return true; }
         }
 
+        private static bool TryReadUnderGate(RecoveryStorage storage, Mutex gate, int milliseconds, out RecoveryRecord record)
+        {
+            record = null;
+            if (!Enter(gate, milliseconds)) return false;
+            try { record = storage.Read(); return true; }
+            finally { gate.ReleaseMutex(); }
+        }
+
+        private static RecoveryRecord ReadAvailableJournal(RecoveryStorage storage)
+        {
+            try { return storage.Read(); }
+            catch (IOException error)
+            {
+                if (!RecoveryStorage.IsSharingViolation(error)) throw;
+                return null;
+            }
+        }
+
         internal static int Watch(RecoveryStorage storage, IDisplays displays, Guid id,
             Func<IDisposable> keepSystemAwake, int trialMilliseconds, int heartbeatMilliseconds = HeartbeatMilliseconds)
         {
             using (var signals = RecoverySignals.Open(storage, id, false))
+            using (var journalGate = storage.OpenGate())
             {
                 try
                 {
-                    RecoveryRecord record = storage.Read();
-                    if (record == null || record.Id != id || record.Phase != RecoveryPhase.Prepared) return 2;
+                    RecoveryRecord record;
+                    if (!TryReadUnderGate(storage, journalGate, GateGrace, out record) || record == null ||
+                        record.Id != id || record.Phase != RecoveryPhase.Prepared) return 2;
                     using (var owner = RecoveryOwner.Open(record, storage.Session))
                     {
                         if (owner == null || owner.Exited) return Restore(storage, displays, id, RecoveryReason.OwnerExit, signals);
@@ -42,7 +62,9 @@ namespace AgentSleep
 
                             while (true)
                             {
-                                record = storage.Read();
+                                // Confirm an unavailable read after publication. A writer cannot stop owner or deadline checks.
+                                RecoveryRecord updated = ReadAvailableJournal(storage);
+                                if (updated != null || TryReadUnderGate(storage, journalGate, 0, out updated)) record = updated;
                                 if (record == null || record.Id != id || !record.Pending) return 0;
                                 if (record.Phase == RecoveryPhase.Failed) return 2;
                                 if (record.Phase == RecoveryPhase.Fallback) return 3;
@@ -76,7 +98,18 @@ namespace AgentSleep
 
         internal static int RestoreCurrent(RecoveryStorage storage, IDisplays displays)
         {
-            RecoveryRecord record = storage.Read();
+            RecoveryRecord record = ReadAvailableJournal(storage);
+            if (record == null)
+            {
+                using (var gate = storage.OpenGate())
+                {
+                    if (!TryReadUnderGate(storage, gate, GateGrace, out record))
+                    {
+                        record = storage.Read();
+                        if (record == null) return 2;
+                    }
+                }
+            }
             return record == null || !record.Pending ? 0 : Restore(storage, displays, record.Id, RecoveryReason.Manual,
                 retryRevision: record.Revision);
         }
@@ -361,7 +394,7 @@ namespace AgentSleep
         {
             using (var gate = storage.OpenGate())
             {
-                if (!RecoveryWorker.Enter(gate, 0)) throw new IOException();
+                if (!RecoveryWorker.Enter(gate, 200)) throw new IOException();
                 try
                 {
                     signals.Mutation.Set();
@@ -449,7 +482,7 @@ namespace AgentSleep
                 if (signals != null && record.Phase == RecoveryPhase.Isolated) signals.Pulse.Set();
                 if (record.Pending && signals != null && (signals.Failed.WaitOne(0) || (helper != null && helper.HasExited))
                     && !triedRecovery && record.Phase != RecoveryPhase.Failed && record.Phase != RecoveryPhase.Fallback)
-                    QueueRestore(RecoveryReason.OwnerExit);
+                    QueueRestore(RecoveryReason.WatchdogUnavailable);
 
                 Update(record);
                 if (record.Pending && Volatile.Read(ref queued) == 0 && Volatile.Read(ref queueFinished) == 2
@@ -458,6 +491,10 @@ namespace AgentSleep
                 if (!record.Pending) CloseHandles();
             }
             catch (RecoveryStaleException) { Set("failed", "prior-logon-snapshot"); }
+            catch (IOException error)
+            {
+                if (!RecoveryStorage.IsSharingViolation(error)) Set("failed", "recovery-journal-unreadable");
+            }
             catch (Exception) { Set("failed", "recovery-journal-unreadable"); }
         }
 

@@ -88,6 +88,51 @@ namespace AgentSleep
                 }
             });
 
+            Case("normal session survives a journal publication gap", (fixture, storage, displays) =>
+            {
+                using (var controller = fixture.Controller())
+                {
+                    controller.Start(Target, false);
+                    Check(controller.State == "active", controller.Detail);
+                    using (var gate = storage.OpenGate())
+                    {
+                        Check(RecoveryWorker.Enter(gate, 1000), "journal writer acquired the gate");
+                        string publishing = storage.JournalPath + ".publishing";
+                        try
+                        {
+                            File.Move(storage.JournalPath, publishing);
+                            try { Check(!fixture.Watchdog.WaitForExit(250), "watchdog exited while the journal was being published"); }
+                            finally { File.Move(publishing, storage.JournalPath); }
+                        }
+                        finally { gate.ReleaseMutex(); }
+                    }
+
+                    var running = Stopwatch.StartNew();
+                    while (running.ElapsedMilliseconds < TestTrial + 150)
+                    {
+                        controller.Poll();
+                        Check(controller.State == "active" && displays.RestoreCount == 0, "normal session restored prematurely");
+                        Thread.Sleep(30);
+                    }
+                    controller.Restore();
+                    Until(() => Poll(controller, "restore-exact"), "manual restore after publication gap");
+                    Check(storage.Read().Reason == RecoveryReason.Manual, "manual restore lost its reason");
+                }
+            });
+
+            Case("a lost watchdog is separate from owner exit", (fixture, storage, displays) =>
+            {
+                using (var controller = fixture.Controller())
+                {
+                    controller.Start(Target, false);
+                    Check(controller.State == "active", controller.Detail);
+                    StopChild(fixture.Watchdog);
+                    Until(() => Poll(controller, "restore-exact"), "live owner restored after watchdog loss");
+                    Check(storage.Read().Reason == RecoveryReason.WatchdogUnavailable && displays.RestoreCount == 1,
+                        "watchdog loss was mistaken for owner exit");
+                }
+            });
+
             Case("restore fences the next mutation", (fixture, storage, displays) =>
             {
                 Process owner = fixture.StartOwner("fence");
@@ -340,6 +385,8 @@ namespace AgentSleep
             private readonly List<Process> watchdogs = new List<Process>();
             private readonly List<RecoveryController> controllers = new List<RecoveryController>();
             private readonly List<Task<int>> restores = new List<Task<int>>();
+
+            internal Process Watchdog { get { return watchdogs[watchdogs.Count - 1]; } }
 
             internal Fixture()
             {

@@ -19,7 +19,7 @@ namespace AgentSleep
 
     internal enum RecoveryReason
     {
-        None, Manual, Deadline, OwnerExit, OwnerHang, Activation, Arm
+        None, Manual, Deadline, OwnerExit, OwnerHang, Activation, Arm, WatchdogUnavailable
     }
 
     internal sealed class RecoveryRecord
@@ -160,6 +160,11 @@ namespace AgentSleep
                 record.Baseline = reader.ReadBytes(baselineLength);
                 return record;
             }
+        }
+
+        internal static bool IsSharingViolation(IOException error)
+        {
+            return error.HResult == unchecked((int)0x80070020) || error.HResult == unchecked((int)0x80070021);
         }
 
         internal void Write(RecoveryRecord record)
@@ -409,7 +414,16 @@ namespace AgentSleep
             return null;
         }
 
-        internal bool Exited { get { return WaitForSingleObject(handle, 0) != 258; } }
+        internal bool Exited
+        {
+            get
+            {
+                uint result = WaitForSingleObject(handle, 0);
+                if (result == 0) return true;
+                if (result == 258) return false;
+                throw new IOException("recovery-owner-wait");
+            }
+        }
 
         internal void Stop()
         {

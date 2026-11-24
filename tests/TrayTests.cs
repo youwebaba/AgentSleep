@@ -81,14 +81,41 @@ namespace AgentSleep
                 "geometry is not verified until the original DPI is observed");
 
             expected.Show = 3;
+            expected.Frame = new Rectangle(2560, 0, 2560, 1392);
             observed = expected;
             observed.Show = 2;
-            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Place,
-                "minimized window receives its original maximized placement");
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Normalize,
+                "originally maximized browser is normalized before relocating from minimized");
             observed = expected;
             observed.Normal.Offset(-2500, 0);
-            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Place,
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Normalize,
                 "maximized rectangle alone does not verify its normal placement");
+            observed = expected;
+            observed.DisplayId = "wrong-physical";
+            observed.Frame.Offset(-2560, 0);
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Normalize,
+                "a maximized window on the wrong display must normalize even with the right stored normal rectangle");
+            observed.Show = 1;
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.MoveNormal,
+                "matching native normal placement cannot hide a wrong visible monitor");
+            observed.DisplayId = expected.DisplayId;
+            observed.Normal.Offset(-24, 0);
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.MoveNormal,
+                "right monitor alone does not authorize maximizing");
+            observed.Normal = expected.Normal;
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Maximize,
+                "only confirmed target and native normal placement allow maximizing");
+            observed = expected;
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Verified,
+                "fresh visible maximized frame verifies the completed relocation");
+            var progress = new BrowserInventory.MaximizedRelocation();
+            Check(progress.TryBegin(BrowserInventory.PlacementAction.Normalize) && progress.TryBegin(BrowserInventory.PlacementAction.Normalize) &&
+                !progress.TryBegin(BrowserInventory.PlacementAction.Normalize), "normalize produces bounded native requests");
+            Check(progress.TryBegin(BrowserInventory.PlacementAction.MoveNormal) && progress.TryBegin(BrowserInventory.PlacementAction.Maximize),
+                "successful normalization still permits a move and maximize");
+            progress.MaximizePosted = true;
+            Check(!progress.TryBegin(BrowserInventory.PlacementAction.Maximize) && !progress.TryBegin(BrowserInventory.PlacementAction.Normalize),
+                "posted maximize waits for readback without repeating or cycling");
 
             expected.Show = 1;
             expected.Fullscreen = expected.Borderless = true;

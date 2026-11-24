@@ -56,6 +56,7 @@ namespace AgentSleep
             {
                 var clock = Stopwatch.StartNew();
                 var focus = new ForegroundGuard();
+                var relocations = new Dictionary<IntPtr, MaximizedRelocation>();
                 do
                 {
                     if (!TrayWindow.IsUnlockedConsole()) return false;
@@ -79,7 +80,7 @@ namespace AgentSleep
                             continue;
                         }
                         if (!original.Identity.Same(observed) || !CanPlaceBrowser(observed.ProcessId)) continue;
-                        if (!VerifyOrRepair(handle, original, physical, focus)) verified = false;
+                        if (!VerifyOrRepair(handle, original, physical, focus, relocations)) verified = false;
                     }
                     focus.Preserve();
                     if (verified) return !physicalCaptureFailed;
@@ -91,7 +92,8 @@ namespace AgentSleep
             return false;
         }
 
-        private static bool VerifyOrRepair(IntPtr handle, SavedPlacement original, Dictionary<Rectangle, string> physical, ForegroundGuard focus)
+        private static bool VerifyOrRepair(IntPtr handle, SavedPlacement original, Dictionary<Rectangle, string> physical,
+            ForegroundGuard focus, Dictionary<IntPtr, MaximizedRelocation> relocations)
         {
             string displayId;
             Rect targetBounds = Rect.From(original.DisplayBounds);
@@ -114,24 +116,48 @@ namespace AgentSleep
             if (action == PlacementAction.Verified) return CurrentWindow(handle, original.Identity);
             if (!TrayWindow.IsUnlockedConsole() || !CurrentWindow(handle, original.Identity) || !IsWindowVisible(handle) || IsCloaked(handle)) return false;
 
-            if (action == PlacementAction.Show) RestoreWithoutActivating(handle, original.Identity);
-            if (action == PlacementAction.Move)
+            if (action == PlacementAction.Normalize || action == PlacementAction.MoveNormal || action == PlacementAction.Maximize)
             {
-                Rectangle bounds = original.Outer;
-                SetWindowPos(handle, IntPtr.Zero, bounds.X, bounds.Y, bounds.Width, bounds.Height,
-                    MoveAsynchronouslyWithoutActivationOrReordering);
+                Rectangle normalScreen = expected.Normal;
+                normalScreen.Offset(target.Work.Left - target.Bounds.Left, target.Work.Top - target.Bounds.Top);
+                Rect anchor = Rect.From(normalScreen);
+                Monitor normalMonitor;
+                if (normalScreen.Width <= 0 || normalScreen.Height <= 0 ||
+                    !ReadMonitor(MonitorFromRect(ref anchor, 0), out normalMonitor) || normalMonitor.Bounds.Rectangle != original.DisplayBounds) return false;
+
+                MaximizedRelocation progress;
+                if (!relocations.TryGetValue(handle, out progress))
+                {
+                    progress = new MaximizedRelocation();
+                    relocations.Add(handle, progress);
+                }
+                if (!progress.TryBegin(action)) return false;
+                if (action == PlacementAction.MoveNormal) MoveFrame(handle, normalScreen);
+                if (action == PlacementAction.Maximize && ShowWindowAsync(handle, MaximizedShow))
+                {
+                    progress.MaximizePosted = true;
+                    focus.Watch(handle);
+                }
             }
-            if (action == PlacementAction.Place && (expected.Show != MaximizedShow || !focus.HasMaximizeRequest(handle)))
+            if (action == PlacementAction.Show) RestoreWithoutActivating(handle, original.Identity);
+            if (action == PlacementAction.Move) MoveFrame(handle, original.Outer);
+            if (action == PlacementAction.Place || action == PlacementAction.Normalize)
             {
                 NativePlacement placement = original.Native;
                 placement.Flags = AsyncPlacement;
-                placement.Show = expected.Show == MaximizedShow ? MaximizedShow : ShowWithoutActivation;
+                placement.Show = ShowWithoutActivation;
                 placement.Normal = Rect.From(expected.Normal);
                 if (placement.Max != new Point(-1, -1)) placement.Max.Offset(adjustment);
-                if (SetWindowPlacement(handle, ref placement) && expected.Show == MaximizedShow) focus.Watch(handle);
+                SetWindowPlacement(handle, ref placement);
             }
             // Queued window changes require fresh native readback.
             return false;
+        }
+
+        private static void MoveFrame(IntPtr handle, Rectangle bounds)
+        {
+            SetWindowPos(handle, IntPtr.Zero, bounds.X, bounds.Y, bounds.Width, bounds.Height,
+                MoveAsynchronouslyWithoutActivationOrReordering);
         }
 
         internal static PlacementAction DecidePlacement(PlacementGeometry expected, PlacementGeometry observed)
@@ -142,6 +168,12 @@ namespace AgentSleep
             if (expected.Fullscreen)
                 return observed.Show == MinimizedShow ? PlacementAction.Show : observed.Borderless ? PlacementAction.Move : PlacementAction.Unavailable;
             if (observed.Fullscreen) return PlacementAction.Unavailable;
+            if (expected.Show == MaximizedShow)
+            {
+                if (observed.Show != NormalShow) return PlacementAction.Normalize;
+                return expected.DisplayId == observed.DisplayId && expected.Normal == observed.Normal && expected.Dpi == observed.Dpi
+                    ? PlacementAction.Maximize : PlacementAction.MoveNormal;
+            }
             return expected.Show == NormalShow && observed.Show == NormalShow ? PlacementAction.Move : PlacementAction.Place;
         }
 
@@ -221,7 +253,6 @@ namespace AgentSleep
                 inputKnown = TrayWindow.TryGetLastInput(out tick, out input);
             }
 
-            internal bool HasMaximizeRequest(IntPtr window) { return requested.Contains(window); }
             internal void Watch(IntPtr window) { requested.Add(window); }
 
             internal void Preserve()
@@ -236,7 +267,25 @@ namespace AgentSleep
             }
         }
 
-        internal enum PlacementAction { Verified, Move, Place, Show, Unavailable }
+        internal enum PlacementAction { Verified, Move, Place, Show, Unavailable, Normalize, MoveNormal, Maximize }
+
+        internal sealed class MaximizedRelocation
+        {
+            private int normalizations, moves, maximizations;
+            internal bool MaximizePosted;
+
+            internal bool TryBegin(PlacementAction action)
+            {
+                if (MaximizePosted) return false;
+                switch (action)
+                {
+                    case PlacementAction.Normalize: return normalizations++ < 2;
+                    case PlacementAction.MoveNormal: return moves++ < 2;
+                    case PlacementAction.Maximize: return maximizations++ < 2;
+                    default: return false;
+                }
+            }
+        }
         internal struct PlacementGeometry
         {
             internal string DisplayId;

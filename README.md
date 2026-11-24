@@ -50,7 +50,7 @@ The original Python discovery tool and its tests remain under [prototype](protot
 | AgentSleep virtual-only | The same Edge session received a click and exact text on the 800 × 600 virtual desktop. All three panels showed standby indicators during the first run. The repeat confirmed darkness through both events. |
 | One-minute AgentSleep timer | Verified virtual-only at 61.9 seconds of Windows input idle. The safety deadline ended this run before a new challenge was completed. The watchdog restored the displays and both Edge windows. |
 | Keyboard restore | The registered **Ctrl+Alt+F11** arrived 22.2 seconds into a four-display-start trial. The original three physical paths and primary returned with the virtual path inactive. A maximized window needed the subsequent placement correction. |
-| Standalone restore | **Verified on the final build.** `--restore` returned `0`. The three original physical paths, primary, and both Edge windows' physical monitors, visible rectangles and show states matched. The signed virtual display remained available and inactive. |
+| Standalone restore | **Verified on the final build.** `--restore` returned `0`. The original three monitors, primary, and both Edge windows' locations and show states matched. The operator confirmed the restored desktop visually. The signed virtual display remained available and inactive. |
 | Tray-process loss | After only the tray was stopped, its watchdog restored all three original physical monitors and both Edge windows to their original screens, rectangles and show states. |
 | Remaining hardware coverage | Physical cable removal, lock, suspend/resume and other agent/browser combinations have not been exercised live. |
 

@@ -70,3 +70,5 @@ The agent brought the fixture forward and captured its clock at 00:37:28.959. Th
 ## Final standalone restore
 
 The final build began with the three original physical screens, the fullscreen fixture and the maximized Edge window. It verified virtual-only at 00:39:12.728 UTC. A separate process invoked `AgentSleep.exe --restore` and the request was recorded at 00:39:24.669. After the physical monitors finished reconnecting, Windows showed exactly the three original physical paths at 00:39:36.164. AgentSleep recorded exact display recovery at 00:39:42.270 and verified browser placement at 00:39:42.850. The command returned `0` and the normal tray remained running. Independent observers matched the original primary, positions, modes and rotations, plus both Edge windows' original physical monitors, visible rectangles and show states. The external safety guard confirmed the result without changing the desktop.
+
+The operator visually confirmed that all three physical screens were in the original arrangement with the same primary, and that both Edge windows were back where expected.

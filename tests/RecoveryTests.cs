@@ -88,6 +88,50 @@ namespace AgentSleep
                 }
             });
 
+            Case("restore request logs distinguish hotkey, desktop check, tray and standalone", (fixture, storage, displays) =>
+            {
+                string log = Path.ChangeExtension(storage.JournalPath, ".log");
+                var requests = new[] { RecoveryRequest.Hotkey, RecoveryRequest.DesktopCheck, RecoveryRequest.TrayRestore,
+                    RecoveryRequest.StandaloneRestore };
+                using (var controller = fixture.Controller())
+                {
+                    foreach (RecoveryRequest request in requests)
+                    {
+                        controller.Start(Target, false);
+                        Check(controller.State == "active", controller.Detail);
+                        if (request == RecoveryRequest.StandaloneRestore)
+                            Check(RecoveryWorker.RestoreCurrent(storage, displays) == 0, "standalone restore");
+                        else
+                            controller.Restore(request);
+                        if (request == RecoveryRequest.DesktopCheck) controller.Restore(RecoveryRequest.Hotkey);
+
+                        Until(() => Poll(controller, "restore-exact"), "verified layout after " + request);
+                        Check(fixture.Watchdog.WaitForExit(5000), "watchdog finished logging " + request);
+                        Check(storage.Read().Reason == RecoveryReason.Manual, "request changed the legacy journal reason");
+                        string[] lines = File.ReadAllLines(log);
+                        Check(lines[lines.Length - 3].EndsWith(" Requested-" + request, StringComparison.Ordinal) &&
+                            lines[lines.Length - 2].EndsWith(" Restoring-Manual", StringComparison.Ordinal) &&
+                            lines[lines.Length - 1].EndsWith(" Complete-Manual", StringComparison.Ordinal),
+                            "request was not distinguished before the recovery transitions: " + request);
+                    }
+                }
+            });
+
+            Case("blocked request diagnostics cannot prevent restoration", (fixture, storage, displays) =>
+            {
+                using (var controller = fixture.Controller())
+                {
+                    controller.Start(Target, false);
+                    Check(controller.State == "active", controller.Detail);
+                    using (File.Open(Path.ChangeExtension(storage.JournalPath, ".log"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                    {
+                        controller.Restore(RecoveryRequest.Hotkey);
+                        Until(() => Poll(controller, "restore-exact"), "recovery with an unwritable diagnostic log");
+                    }
+                    Check(displays.Physical && displays.RestoreCount == 1, "diagnostic failure changed the restore result");
+                }
+            });
+
             Case("normal session survives a journal publication gap", (fixture, storage, displays) =>
             {
                 using (var controller = fixture.Controller())

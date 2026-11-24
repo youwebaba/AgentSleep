@@ -111,11 +111,12 @@ namespace AgentSleep
                 }
             }
             return record == null || !record.Pending ? 0 : Restore(storage, displays, record.Id, RecoveryReason.Manual,
-                retryRevision: record.Revision);
+                retryRevision: record.Revision, request: RecoveryRequest.StandaloneRestore);
         }
 
         internal static int Restore(RecoveryStorage storage, IDisplays displays, Guid id, RecoveryReason reason,
-            RecoverySignals signals = null, RecoveryOwner owner = null, int retryRevision = 0)
+            RecoverySignals signals = null, RecoveryOwner owner = null, int retryRevision = 0,
+            RecoveryRequest request = RecoveryRequest.Unspecified)
         {
             bool ownSignals = signals == null;
             bool ownOwner = owner == null;
@@ -125,6 +126,12 @@ namespace AgentSleep
                 {
                     try { signals = RecoverySignals.Open(storage, id, false); }
                     catch (WaitHandleCannotBeOpenedException) { }
+                }
+                bool logRequest = request != RecoveryRequest.Unspecified;
+                if (logRequest && (signals == null || !signals.Manual.WaitOne(0)))
+                {
+                    storage.LogRequest(request);
+                    logRequest = false;
                 }
                 if (signals != null)
                 {
@@ -153,6 +160,8 @@ namespace AgentSleep
                             if (record.Phase == RecoveryPhase.Failed) return 2;
                             if (record.Phase == RecoveryPhase.Fallback) return 3;
                         }
+                        else if (logRequest && (record.Phase == RecoveryPhase.Failed || record.Phase == RecoveryPhase.Fallback))
+                            storage.LogRequest(request);
                         if (signals != null && signals.Manual.WaitOne(0)) reason = RecoveryReason.Manual;
                         if (record.Reason == RecoveryReason.Activation) reason = RecoveryReason.Activation;
                         if (reason == RecoveryReason.Deadline &&
@@ -441,16 +450,19 @@ namespace AgentSleep
             catch (Exception) { }
         }
 
-        internal void Restore()
+        internal void Restore(RecoveryRequest request = RecoveryRequest.Unspecified)
         {
             if (storage == null || disposed) return;
             bool hasActiveHelper = State != "failed" && State != "fallback" &&
                 helper != null && !helper.HasExited && signals != null && !signals.Failed.WaitOne(0);
-            if (signals != null) signals.Manual.Set();
             if (Pending)
             {
+                bool retry = State == "failed" || State == "fallback";
+                if (retry || (signals == null ? !QueuedRestorePending : !signals.Manual.WaitOne(0)))
+                    storage.LogRequest(request);
+                if (signals != null) signals.Manual.Set();
                 int retryRevision = 0;
-                if (State == "failed" || State == "fallback")
+                if (retry)
                 {
                     try
                     {
@@ -591,7 +603,7 @@ namespace AgentSleep
         public void Dispose()
         {
             if (disposed) return;
-            if (Pending && ownsRecord) Restore();
+            if (Pending && ownsRecord) Restore(RecoveryRequest.TrayExit);
             if (ownsRecord && id != Guid.Empty) CleanupReceipt(id, false);
             CloseHandles();
             disposed = true;

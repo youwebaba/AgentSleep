@@ -10,17 +10,20 @@ namespace AgentSleep
 {
     internal sealed class BrowserInventory
     {
+        private const int ShowWithoutActivation = 4;
+        private const uint MoveAsynchronouslyWithoutActivationOrReordering = 0x4014;
         private static readonly HashSet<string> Browsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
             "chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "chromium", "waterfox", "librewolf"
         };
 
-        internal readonly Dictionary<IntPtr, uint> Visible = new Dictionary<IntPtr, uint>();
-        internal int Minimized;
+        internal readonly Dictionary<IntPtr, BrowserWindow> Visible = new Dictionary<IntPtr, BrowserWindow>();
+        internal readonly Dictionary<IntPtr, BrowserWindow> Minimized = new Dictionary<IntPtr, BrowserWindow>();
+        private readonly HashSet<IntPtr> showRequested = new HashSet<IntPtr>();
 
         internal static BrowserInventory Read()
         {
             var result = new BrowserInventory();
-            var processCache = new Dictionary<uint, bool>();
+            var processCache = new Dictionary<uint, long>();
             EnumWindowCallback inspect = delegate(IntPtr hwnd, IntPtr ignored)
             {
                 if (!IsWindowVisible(hwnd) || GetWindow(hwnd, 4) != IntPtr.Zero) return true;
@@ -32,50 +35,84 @@ namespace AgentSleep
                 int cloaked;
                 if (DwmGetWindowAttribute(hwnd, 14, out cloaked, sizeof(int)) == 0 && cloaked != 0) return true;
                 uint owner;
-                if (GetWindowThreadProcessId(hwnd, out owner) == 0) return true;
-                bool browser;
-                if (!processCache.TryGetValue(owner, out browser))
+                uint thread = GetWindowThreadProcessId(hwnd, out owner);
+                if (thread == 0) return true;
+                long started;
+                if (!processCache.TryGetValue(owner, out started))
                 {
-                    try
-                    {
-                        using (Process process = Process.GetProcessById((int)owner))
-                            browser = Browsers.Contains(process.ProcessName);
-                    }
-                    catch (ArgumentException) { browser = false; }
-                    catch (InvalidOperationException) { browser = false; }
-                    catch (System.ComponentModel.Win32Exception) { browser = false; }
-                    processCache[owner] = browser;
+                    started = ReadBrowserStart(owner);
+                    processCache[owner] = started;
                 }
-                if (!browser) return true;
-                if (IsIconic(hwnd)) result.Minimized++;
-                else result.Visible[hwnd] = owner;
+                if (started != 0)
+                    (IsIconic(hwnd) ? result.Minimized : result.Visible)[hwnd] = new BrowserWindow(owner, thread, started);
                 return true;
             };
             if (!EnumWindows(inspect, IntPtr.Zero)) throw new InvalidOperationException("Browser windows could not be inspected.");
             return result;
         }
 
+        private static long ReadBrowserStart(uint processId)
+        {
+            try
+            {
+                using (Process process = Process.GetProcessById((int)processId))
+                    if (Browsers.Contains(process.ProcessName)) return process.StartTime.ToUniversalTime().Ticks;
+            }
+            catch (ArgumentException) { }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
+            return 0;
+        }
+
         internal string Summary()
         {
             string status = Visible.Count == 0 ? "No supported visible browser windows were available to verify." :
                 String.Format("Verified desktop bounds for {0} supported browser window(s).", Visible.Count);
-            if (Minimized != 0) status += String.Format(" {0} minimized window(s) were left minimized.", Minimized);
+            if (Minimized.Count != 0) status += String.Format(" {0} minimized window(s) were left minimized.", Minimized.Count);
             return status;
+        }
+
+        internal bool VerifyInitialVisibility(BrowserInventory previous, Func<IntPtr, BrowserWindow, bool> tryShow)
+        {
+            if (previous == null) return true;
+            bool allVisible = true;
+            foreach (KeyValuePair<IntPtr, BrowserWindow> browser in previous.Visible)
+            {
+                BrowserWindow observed;
+                if (Visible.TryGetValue(browser.Key, out observed) && browser.Value.Same(observed)) continue;
+                allVisible = false;
+                if (!previous.showRequested.Contains(browser.Key) && Minimized.TryGetValue(browser.Key, out observed) &&
+                    browser.Value.Same(observed) && tryShow(browser.Key, observed)) previous.showRequested.Add(browser.Key);
+            }
+            return allVisible;
+        }
+
+        private static bool CurrentWindow(IntPtr hwnd, BrowserWindow browser)
+        {
+            uint processId;
+            return GetWindowThreadProcessId(hwnd, out processId) == browser.ThreadId && processId == browser.ProcessId &&
+                ReadBrowserStart(processId) == browser.ProcessStart;
+        }
+
+        private static bool RestoreWithoutActivating(IntPtr hwnd, BrowserWindow browser)
+        {
+            return CurrentWindow(hwnd, browser) && IsWindowVisible(hwnd) && IsIconic(hwnd) &&
+                ShowWindowAsync(hwnd, ShowWithoutActivation);
         }
 
         internal bool Verify(BrowserInventory previous, Screen screen)
         {
-            if (previous != null)
-                foreach (KeyValuePair<IntPtr, uint> browser in previous.Visible)
-                {
-                    uint owner;
-                    if (!Visible.TryGetValue(browser.Key, out owner) || owner != browser.Value) return false;
-                }
+            if (!VerifyInitialVisibility(previous, RestoreWithoutActivating)) return false;
 
             bool allReachable = true;
             Rectangle area = screen.WorkingArea;
-            foreach (IntPtr hwnd in Visible.Keys)
+            foreach (KeyValuePair<IntPtr, BrowserWindow> browser in Visible)
             {
+                IntPtr hwnd = browser.Key;
+                BrowserWindow previouslyMinimized;
+                if (previous != null && previous.Minimized.TryGetValue(hwnd, out previouslyMinimized) &&
+                    browser.Value.Same(previouslyMinimized)) continue;
+                if (!CurrentWindow(hwnd, browser.Value) || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return false;
                 Rect bounds;
                 bool haveBounds = DwmGetWindowAttribute(hwnd, 9, out bounds, Marshal.SizeOf(typeof(Rect))) == 0;
                 if (!haveBounds && !GetWindowRect(hwnd, out bounds)) return false;
@@ -87,11 +124,30 @@ namespace AgentSleep
                 int height = Math.Min(bounds.Rectangle.Height, area.Height);
                 int x = area.Left + (area.Width - width) / 2;
                 int y = area.Top + (area.Height - height) / 2;
-                SetWindowPos(hwnd, IntPtr.Zero, x, y, width, height, 0x4014);
+                if (CurrentWindow(hwnd, browser.Value) && IsWindowVisible(hwnd) && !IsIconic(hwnd))
+                    SetWindowPos(hwnd, IntPtr.Zero, x, y, width, height, MoveAsynchronouslyWithoutActivationOrReordering);
                 // Recheck actual bounds after the browser processes the asynchronous request.
                 allReachable = false;
             }
             return allReachable;
+        }
+
+        internal sealed class BrowserWindow
+        {
+            internal readonly uint ProcessId, ThreadId;
+            internal readonly long ProcessStart;
+
+            internal BrowserWindow(uint processId, uint threadId, long processStart)
+            {
+                ProcessId = processId;
+                ThreadId = threadId;
+                ProcessStart = processStart;
+            }
+
+            internal bool Same(BrowserWindow other)
+            {
+                return ProcessId == other.ProcessId && ThreadId == other.ThreadId && ProcessStart == other.ProcessStart;
+            }
         }
 
         internal static bool IsReachable(Rectangle bounds, Rectangle area, Rectangle screen)
@@ -125,6 +181,7 @@ namespace AgentSleep
         [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr data);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
         [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
+        [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hwnd, int command);
         [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder name, int size);
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);

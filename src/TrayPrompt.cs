@@ -52,7 +52,7 @@ namespace AgentSleep
             {
                 case PromptMode.Hotkey:
                     Text = "AgentSleep — Restore hotkey check";
-                    instructions = "After your physical monitors go dark, wait five seconds and press " + shortcut + " once.";
+                    instructions = "After your physical monitors go dark, wait fifteen seconds and press " + shortcut + " once.";
                     break;
                 case PromptMode.Standalone:
                     Text = "AgentSleep — Standalone restore check";

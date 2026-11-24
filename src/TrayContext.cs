@@ -57,7 +57,7 @@ namespace AgentSleep
 
             window = new TrayWindow();
             window.TryRegister(settings.Modifiers, settings.Key);
-            window.Hotkey = delegate { RequestRestore("Restore hotkey received."); };
+            window.Hotkey = delegate { RequestRestore("Restore hotkey received.", RecoveryRequest.Hotkey); };
             window.Prompt = delegate(PromptMode mode) { ShowPrompt(mode); };
             window.Interrupted = delegate { Interrupt("Session locked, disconnected, or suspended."); };
             window.Resumed = ResetAfterInterruption;
@@ -65,7 +65,7 @@ namespace AgentSleep
 
             menu = new ContextMenuStrip();
             start = Add("Start now", delegate { StartSession(false); });
-            restore = Add("Restore displays", delegate { RequestRestore("Restore requested from the tray."); });
+            restore = Add("Restore displays", delegate { RequestRestore("Restore requested from the tray.", RecoveryRequest.TrayRestore); });
             pause = Add("Pause timer", TogglePause);
             settingsMenu = Add("Settings", ShowSettings);
             Add("Status", ShowStatus);
@@ -116,7 +116,7 @@ namespace AgentSleep
                 bool unlocked = window.IsLocalDesktop();
                 if (resumeRestore.ShouldRetry(unlocked, recovery.Pending, recovery.State))
                 {
-                    RequestRestore("Retrying restoration on the unlocked local desktop.");
+                    RequestRestore("Retrying restoration on the unlocked local desktop.", RecoveryRequest.SessionInterrupted);
                     return;
                 }
                 if (!unlocked)
@@ -133,9 +133,11 @@ namespace AgentSleep
                         return;
                     }
                     if (restoreRequested || (recovery.State != "trial" && recovery.State != "active")) return;
-                    if (!HasRestoreHotkey() || !SetPower(true))
+                    bool hasHotkey = HasRestoreHotkey();
+                    if (!hasHotkey || !SetPower(true))
                     {
-                        RequestRestore("The restore hotkey or Windows power request became unavailable.");
+                        RequestRestore("The restore hotkey or Windows power request became unavailable.",
+                            hasHotkey ? RecoveryRequest.PowerUnavailable : RecoveryRequest.HotkeyUnavailable);
                         return;
                     }
                     VerifySession();
@@ -170,7 +172,8 @@ namespace AgentSleep
             {
                 paused = true;
                 notice = error.Message;
-                if (!restoreRequested && recovery.Pending) RequestRestore("An unexpected session check failed. " + error.Message);
+                if (!restoreRequested && recovery.Pending)
+                    RequestRestore("An unexpected session check failed. " + error.Message, RecoveryRequest.DesktopCheck);
                 else if (!recovery.Pending || SessionPowerMustRelease()) SetPower(false);
             }
         }
@@ -205,7 +208,7 @@ namespace AgentSleep
             if (startPrompt != null) startPrompt.Close();
             resumeRestore.Interrupt(recovery.Pending);
             ResetAfterInterruption();
-            if (!restoreRequested && recovery.Pending) RequestRestore(reason);
+            if (!restoreRequested && recovery.Pending) RequestRestore(reason, RecoveryRequest.SessionInterrupted);
         }
 
         private void ResetAfterInterruption()
@@ -357,7 +360,7 @@ namespace AgentSleep
             }
             catch (Exception error)
             {
-                if (recovery.Pending) RequestRestore("The session did not start safely. " + error.Message);
+                if (recovery.Pending) RequestRestore("The session did not start safely. " + error.Message, RecoveryRequest.DesktopCheck);
                 else SetPower(false);
                 StartFailed(automated, "The session could not start. " + error.Message);
             }
@@ -391,14 +394,14 @@ namespace AgentSleep
             {
                 recovery.Poll();
                 if (recovery.State == "active" || recovery.State == "trial")
-                    RequestRestore("The selected display is no longer the only active display.");
+                    RequestRestore("The selected display is no longer the only active display.", RecoveryRequest.TopologyChanged);
                 return;
             }
 
             Screen screen = BrowserInventory.ReadSingleScreen();
             if (verifiedBounds.HasValue && (screen == null || verifiedBounds.Value != screen.Bounds || verifiedScreen != screen.DeviceName))
             {
-                RequestRestore("The virtual desktop geometry changed during the session.");
+                RequestRestore("The virtual desktop geometry changed during the session.", RecoveryRequest.TopologyChanged);
                 return;
             }
             BrowserInventory current = BrowserInventory.Read();
@@ -415,18 +418,19 @@ namespace AgentSleep
             else
             {
                 desktopVerified = false;
-                if (now >= verifyBy) RequestRestore("A usable virtual desktop or a supported browser window could not be verified.");
+                if (now >= verifyBy)
+                    RequestRestore("A usable virtual desktop or a supported browser window could not be verified.", RecoveryRequest.DesktopCheck);
             }
         }
 
-        private void RequestRestore(string reason)
+        private void RequestRestore(string reason, RecoveryRequest cause)
         {
             if (!recovery.Pending) return;
             restoreRequested = true;
             qualifyingTrial = false;
             notice = reason;
             if (SessionPowerMustRelease() || !window.IsLocalDesktop()) SetPower(false);
-            try { recovery.Restore(); }
+            try { recovery.Restore(cause); }
             catch (Exception error)
             {
                 SetPower(false);
@@ -579,14 +583,14 @@ namespace AgentSleep
             if (exitRequested) return;
             exitRequested = true;
             SetPower(false);
-            RequestRestore("Restoring displays before AgentSleep exits.");
+            RequestRestore("Restoring displays before AgentSleep exits.", RecoveryRequest.TrayExit);
         }
 
         protected override void ExitThreadCore()
         {
             timer.Stop();
             SetPower(false);
-            if (recovery.Pending && !restoreRequested) RequestRestore("AgentSleep is exiting.");
+            if (recovery.Pending && !restoreRequested) RequestRestore("AgentSleep is exiting.", RecoveryRequest.TrayExit);
             base.ExitThreadCore();
         }
 

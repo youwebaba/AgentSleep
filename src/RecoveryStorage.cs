@@ -22,6 +22,12 @@ namespace AgentSleep
         None, Manual, Deadline, OwnerExit, OwnerHang, Activation, Arm, WatchdogUnavailable
     }
 
+    internal enum RecoveryRequest
+    {
+        Unspecified, Hotkey, TrayRestore, StandaloneRestore, DesktopCheck, SessionInterrupted,
+        PowerUnavailable, HotkeyUnavailable, TopologyChanged, TrayExit
+    }
+
     internal sealed class RecoveryRecord
     {
         internal Guid Id;
@@ -228,6 +234,12 @@ namespace AgentSleep
             catch (UnauthorizedAccessException) { }
         }
 
+        internal void LogRequest(RecoveryRequest request)
+        {
+            if (request != RecoveryRequest.Unspecified && Enum.IsDefined(typeof(RecoveryRequest), request))
+                Log("Requested-" + request);
+        }
+
         private void Log(string code)
         {
             try
@@ -239,6 +251,7 @@ namespace AgentSleep
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+            catch (System.Security.SecurityException) { }
         }
     }
 

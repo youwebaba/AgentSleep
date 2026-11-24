@@ -8,6 +8,7 @@ namespace AgentSleep
         internal static void Run()
         {
             CheckPrompts();
+            CheckMinimizedBrowsers();
             var idle = new IdleClock();
             idle.Reset(0);
             Check(!idle.IsDue(400000, 100000, 0, 360000), "first idle sample");
@@ -58,6 +59,48 @@ namespace AgentSleep
             Check(BrowserInventory.IsReachable(screen, area, screen), "fullscreen browser over the taskbar");
             var primary = new Rectangle(0, 0, 1920, 1040);
             Check(!BrowserInventory.IsReachable(new Rectangle(1600, 10, 1000, 900), primary, primary), "mostly hidden on the primary screen");
+        }
+
+        private static void CheckMinimizedBrowsers()
+        {
+            var wasVisible = new IntPtr(101);
+            var wasMinimized = new IntPtr(102);
+            var newWindow = new IntPtr(103);
+            var browser = new BrowserInventory.BrowserWindow(10, 20, 30);
+            var before = new BrowserInventory();
+            before.Visible[wasVisible] = browser;
+            before.Minimized[wasMinimized] = browser;
+
+            var after = new BrowserInventory();
+            after.Minimized[wasVisible] = new BrowserInventory.BrowserWindow(10, 20, 30);
+            after.Minimized[wasMinimized] = browser;
+            after.Minimized[newWindow] = browser;
+            int attempts = 0;
+            Func<IntPtr, BrowserInventory.BrowserWindow, bool> show = delegate(IntPtr window, BrowserInventory.BrowserWindow observed)
+            {
+                Check(window == wasVisible && observed.Same(browser), "only the same previously visible browser gets shown");
+                return ++attempts > 1;
+            };
+            Check(!after.VerifyInitialVisibility(before, show) && attempts == 1, "failed async request waits for retry");
+            Check(!after.VerifyInitialVisibility(before, show) && attempts == 2, "accepted async request still needs fresh readback");
+            Check(!after.VerifyInitialVisibility(before, show) && attempts == 2, "accepted requests are not posted again");
+            var readback = new BrowserInventory();
+            readback.Visible[wasVisible] = browser;
+            readback.Minimized[wasMinimized] = browser;
+            Check(readback.VerifyInitialVisibility(before, show) && attempts == 2, "fresh visible readback completes entry verification");
+
+            var original = new BrowserInventory();
+            original.Visible[wasVisible] = browser;
+            var replacement = new BrowserInventory();
+            foreach (BrowserInventory.BrowserWindow reused in new[] {
+                new BrowserInventory.BrowserWindow(11, 20, 30),
+                new BrowserInventory.BrowserWindow(10, 21, 30),
+                new BrowserInventory.BrowserWindow(10, 20, 31) })
+            {
+                replacement.Minimized[wasVisible] = reused;
+                Check(!replacement.VerifyInitialVisibility(original, show) && attempts == 2, "reused HWND does not get shown or match readback");
+            }
+            Check(!new BrowserInventory().VerifyInitialVisibility(original, show) && attempts == 2, "closed window stays a verification failure");
         }
 
         private static void CheckPrompts()

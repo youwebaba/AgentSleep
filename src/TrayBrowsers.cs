@@ -8,7 +8,7 @@ using System.Windows.Forms;
 
 namespace AgentSleep
 {
-    internal sealed class BrowserInventory
+    internal sealed partial class BrowserInventory
     {
         private const int ShowWithoutActivation = 4;
         private const uint MoveAsynchronouslyWithoutActivationOrReordering = 0x4014;
@@ -175,6 +175,10 @@ namespace AgentSleep
         {
             internal int Left, Top, Right, Bottom;
             internal Rectangle Rectangle { get { return Rectangle.FromLTRB(Left, Top, Right, Bottom); } }
+            internal static Rect From(Rectangle rectangle)
+            {
+                return new Rect { Left = rectangle.Left, Top = rectangle.Top, Right = rectangle.Right, Bottom = rectangle.Bottom };
+            }
         }
 
         private delegate bool EnumWindowCallback(IntPtr hwnd, IntPtr data);

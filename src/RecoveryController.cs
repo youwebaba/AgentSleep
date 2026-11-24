@@ -39,7 +39,8 @@ namespace AgentSleep
         }
 
         internal static int Watch(RecoveryStorage storage, IDisplays displays, Guid id,
-            Func<IDisposable> keepSystemAwake, int trialMilliseconds, int heartbeatMilliseconds = HeartbeatMilliseconds)
+            Func<IDisposable> keepSystemAwake, int trialMilliseconds, int heartbeatMilliseconds = HeartbeatMilliseconds,
+            Func<Func<bool>> captureBrowserRepair = null)
         {
             using (var signals = RecoverySignals.Open(storage, id, false))
             using (var journalGate = storage.OpenGate())
@@ -56,36 +57,41 @@ namespace AgentSleep
                         using (var wakeRequest = keepSystemAwake())
                         {
                             if (wakeRequest == null) throw new IOException("watchdog-power-request");
-                            var clock = Stopwatch.StartNew();
-                            bool isolated = false;
-                            long pulse = 0;
-                            signals.Ready.Set();
-
-                            while (true)
+                            Func<bool> repair = CaptureBrowserRepair(storage, signals, captureBrowserRepair);
+                            try
                             {
-                                // Confirm an unavailable read after publication. A writer cannot stop owner or deadline checks.
-                                RecoveryRecord updated = ReadAvailableJournal(storage);
-                                if (updated != null || TryReadUnderGate(storage, journalGate, 0, out updated)) record = updated;
-                                if (record == null || record.Id != id || !record.Pending) return 0;
-                                if (record.Phase == RecoveryPhase.Failed) return 2;
-                                if (record.Phase == RecoveryPhase.Fallback) return 3;
-                                if (signals.Manual.WaitOne(0))
-                                    return Restore(storage, displays, id, RecoveryReason.Manual, signals, owner);
-                                if (owner.Exited)
-                                    return Restore(storage, displays, id, RecoveryReason.OwnerExit, signals, owner);
+                                var clock = Stopwatch.StartNew();
+                                bool isolated = false;
+                                long pulse = 0;
+                                signals.Ready.Set();
 
-                                long now = clock.ElapsedMilliseconds;
-                                if (record.Phase == RecoveryPhase.Isolated && !isolated)
+                                while (true)
                                 {
-                                    isolated = true;
-                                    pulse = now;
+                                    // Confirm an unavailable read after publication. A writer cannot stop owner or deadline checks.
+                                    RecoveryRecord updated = ReadAvailableJournal(storage);
+                                    if (updated != null || TryReadUnderGate(storage, journalGate, 0, out updated)) record = updated;
+                                    if (record == null || record.Id != id || !record.Pending) return 0;
+                                    if (record.Phase == RecoveryPhase.Failed) return 2;
+                                    if (record.Phase == RecoveryPhase.Fallback) return 3;
+                                    if (signals.Manual.WaitOne(0))
+                                        return Restore(storage, displays, id, RecoveryReason.Manual, signals, owner);
+                                    if (owner.Exited)
+                                        return Restore(storage, displays, id, RecoveryReason.OwnerExit, signals, owner);
+
+                                    long now = clock.ElapsedMilliseconds;
+                                    if (record.Phase == RecoveryPhase.Isolated && !isolated)
+                                    {
+                                        isolated = true;
+                                        pulse = now;
+                                    }
+                                    if ((record.Timed || !isolated) && now >= trialMilliseconds)
+                                        return Restore(storage, displays, id, RecoveryReason.Deadline, signals, owner);
+                                    if (isolated && now - pulse >= heartbeatMilliseconds)
+                                        return Restore(storage, displays, id, RecoveryReason.OwnerHang, signals, owner);
+                                    if (signals.Pulse.WaitOne(60)) pulse = clock.ElapsedMilliseconds;
                                 }
-                                if ((record.Timed || !isolated) && now >= trialMilliseconds)
-                                    return Restore(storage, displays, id, RecoveryReason.Deadline, signals, owner);
-                                if (isolated && now - pulse >= heartbeatMilliseconds)
-                                    return Restore(storage, displays, id, RecoveryReason.OwnerHang, signals, owner);
-                                if (signals.Pulse.WaitOne(60)) pulse = clock.ElapsedMilliseconds;
                             }
+                            finally { RepairBrowsersAfterExact(storage, id, journalGate, signals, repair); }
                         }
                     }
                 }
@@ -95,6 +101,37 @@ namespace AgentSleep
                     return 2;
                 }
             }
+        }
+
+        private static Func<bool> CaptureBrowserRepair(RecoveryStorage storage, RecoverySignals signals, Func<Func<bool>> capture)
+        {
+            if (capture == null || signals.ExactAfterIsolation == null) return null;
+            try { return capture(); }
+            catch (Exception)
+            {
+                storage.LogBrowserCaptureFailure();
+                return null;
+            }
+        }
+
+        private static void RepairBrowsersAfterExact(RecoveryStorage storage, Guid id, Mutex gate,
+            RecoverySignals signals, Func<bool> repair)
+        {
+            if (repair == null) return;
+            bool verified;
+            try
+            {
+                if (!signals.ExactAfterIsolation.WaitOne(0) || !Enter(gate, GateGrace)) return;
+                try
+                {
+                    RecoveryRecord record = storage.Read();
+                    if (record != null && (record.Id != id || record.Phase != RecoveryPhase.Complete)) return;
+                    verified = repair();
+                }
+                finally { gate.ReleaseMutex(); }
+            }
+            catch (Exception) { verified = false; }
+            storage.LogBrowserRepair(verified);
         }
 
         internal static int RestoreCurrent(RecoveryStorage storage, IDisplays displays)
@@ -182,6 +219,7 @@ namespace AgentSleep
                             return 0;
                         }
 
+                        bool hadIsolatedDesktop = record.Phase == RecoveryPhase.Isolated;
                         record.Phase = RecoveryPhase.Restoring;
                         storage.Write(record);
                         try
@@ -202,6 +240,8 @@ namespace AgentSleep
                             return 2;
                         }
 
+                        // Publish verified exact to the watcher before a terminal receipt can disappear.
+                        if (hadIsolatedDesktop && signals != null) signals.MarkExactAfterIsolation();
                         record.Phase = RecoveryPhase.Complete;
                         record.Baseline = new byte[0];
                         storage.Write(record);
@@ -676,8 +716,17 @@ namespace AgentSleep
             {
                 try
                 {
-                    exitCode = RecoveryWorker.Watch(RecoveryStorage.Open(), new NativeDisplays(), id,
-                        WatchdogPower.Acquire, RecoveryWorker.TrialMilliseconds);
+                    var displays = new NativeDisplays();
+                    Func<Func<bool>> captureBrowserRepair = null;
+#if !DRY_RUN_ONLY
+                    captureBrowserRepair = delegate
+                    {
+                        BrowserInventory browsers = BrowserInventory.CapturePhysical(displays);
+                        return () => browsers != null && browsers.RepairAfterExact(displays);
+                    };
+#endif
+                    exitCode = RecoveryWorker.Watch(RecoveryStorage.Open(), displays, id,
+                        WatchdogPower.Acquire, RecoveryWorker.TrialMilliseconds, captureBrowserRepair: captureBrowserRepair);
                 }
                 catch (Exception) { }
             }

@@ -9,6 +9,7 @@ namespace AgentSleep
         {
             CheckPrompts();
             CheckMinimizedBrowsers();
+            CheckRestoredBrowserPlacement();
             var idle = new IdleClock();
             idle.Reset(0);
             Check(!idle.IsDue(400000, 100000, 0, 360000), "first idle sample");
@@ -59,6 +60,51 @@ namespace AgentSleep
             Check(BrowserInventory.IsReachable(screen, area, screen), "fullscreen browser over the taskbar");
             var primary = new Rectangle(0, 0, 1920, 1040);
             Check(!BrowserInventory.IsReachable(new Rectangle(1600, 10, 1000, 900), primary, primary), "mostly hidden on the primary screen");
+        }
+
+        private static void CheckRestoredBrowserPlacement()
+        {
+            var expected = new BrowserInventory.PlacementGeometry {
+                DisplayId = "original-right", Show = 1, Dpi = 144,
+                Frame = new Rectangle(2640, 70, 1300, 900), Normal = new Rectangle(2632, 70, 1316, 908)
+            };
+            var observed = expected;
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Verified,
+                "idempotent exact browser placement");
+            observed.DisplayId = "wrong-physical";
+            observed.Frame = new Rectangle(24, 40, 784, 543);
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Move,
+                "normal browser moves back to its original monitor and size");
+            observed = expected;
+            observed.Dpi = 96;
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Move,
+                "geometry is not verified until the original DPI is observed");
+
+            expected.Show = 3;
+            observed = expected;
+            observed.Show = 2;
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Place,
+                "minimized window receives its original maximized placement");
+            observed = expected;
+            observed.Normal.Offset(-2500, 0);
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Place,
+                "maximized rectangle alone does not verify its normal placement");
+
+            expected.Show = 1;
+            expected.Fullscreen = expected.Borderless = true;
+            observed = expected;
+            observed.Fullscreen = observed.Borderless = false;
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Unavailable,
+                "exited native fullscreen is not recreated with browser input");
+            observed.Borderless = true;
+            Check(BrowserInventory.DecidePlacement(expected, observed) == BrowserInventory.PlacementAction.Move,
+                "a still borderless fullscreen browser can move to its saved monitor");
+
+            var monitor = new Rectangle(-2560, 0, 2560, 1440);
+            var workBefore = new Rectangle(-2560, 0, 2560, 1392);
+            var workAfter = new Rectangle(-2512, 0, 2512, 1440);
+            Check(BrowserInventory.WorkspaceAdjustment(monitor, workBefore, monitor, workAfter) == new Point(-48, 0),
+                "workspace rectangle shifts against a taskbar inset on a negative origin monitor");
         }
 
         private static void CheckMinimizedBrowsers()

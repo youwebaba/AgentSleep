@@ -115,6 +115,52 @@ namespace AgentSleep
                 }
             });
 
+            Case("browser repair runs in the watchdog after standalone exact with the owner gone", (fixture, storage, displays) =>
+            {
+                displays.Set("browser-hook");
+                displays.Set("hold-restore");
+                Process owner = fixture.StartOwner("crash");
+                Until(() => displays.Has("owner-isolated"), "owner isolated its displays");
+                Check(displays.Has("browser-captured") && !displays.Has("browser-repair-attempted"), "watchdog capture timing");
+
+                Task<int> standalone = fixture.StartManualRestore(enterFirst: true);
+                try
+                {
+                    Until(() => displays.Has("restore-entered"), "standalone began display restoration");
+                    StopChild(owner);
+                    Check(!displays.Has("browser-repair-attempted"), "browser repair ran before exact display verification");
+                }
+                finally { displays.Set("release-restore"); }
+
+                Check(standalone.Wait(5000) && standalone.Result == 0, "standalone verified the exact display layout");
+                Check(fixture.Watchdog.WaitForExit(5000) && fixture.Watchdog.ExitCode == 0 && displays.Has("browser-repaired"),
+                    "watchdog missed verified standalone recovery after owner loss");
+                Check(storage.Read() == null && displays.RestoreCount == 1 && displays.Has("wake-released"),
+                    "watchdog mishandled receipt cleanup, restoration or awake ownership");
+            });
+
+            Case("an old browser repair cannot cross into a new transaction", (fixture, storage, displays) =>
+            {
+                displays.Set("browser-hook");
+                using (var controller = fixture.Controller())
+                {
+                    controller.Start(Target, false);
+                    Check(controller.State == "active" && displays.Has("browser-captured"), "browser hook armed");
+                    Task<int> standalone = fixture.StartManualRestore(enterFirst: true, whileHoldingGate: () =>
+                    {
+                        RecoveryRecord newer = storage.Read();
+                        Check(newer.Phase == RecoveryPhase.Complete, "first restore finished before new entry");
+                        newer.Id = Guid.NewGuid();
+                        newer.Phase = RecoveryPhase.Prepared;
+                        newer.Baseline = new byte[] { 42, 1 };
+                        storage.Write(newer);
+                    });
+                    Check(standalone.Wait(5000) && standalone.Result == 0, "standalone exact before the new entry");
+                    Check(fixture.Watchdog.WaitForExit(5000) && fixture.Watchdog.ExitCode == 0 &&
+                        !displays.Has("browser-repair-attempted"), "the old watchdog moved browsers during a new entry");
+                }
+            });
+
             Case("standalone joins watchdog fallback and failure", (fixture, storage, displays) =>
             {
                 var outcomes = new[] {
@@ -289,11 +335,13 @@ namespace AgentSleep
                 {
                     displays.Set("bad-readback");
                     displays.Set("hold-wake-release");
+                    displays.Set("browser-hook");
                     controller.Start(Target, false);
                     Until(() => Poll(controller, "activation-failed-restored-exact"), "activation failure");
                     Check(controller.State == "failed" && displays.Physical && !controller.Pending, "activation state");
                     Until(() => displays.Has("wake-release-started"), "watchdog reached power release after publishing terminal status");
                     Check(!displays.Has("wake-released"), "watchdog released before the fixture allowed it");
+                    Check(!displays.Has("browser-repair-attempted"), "browser repair ran after an aborted switch");
                 }
             });
 
@@ -302,11 +350,14 @@ namespace AgentSleep
                 using (var controller = fixture.Controller())
                 {
                     displays.Set("fallback");
+                    displays.Set("browser-hook");
                     controller.Start(Target, false);
                     Check(controller.State == "active", controller.Detail);
                     controller.Restore();
                     Until(() => Poll(controller, "physical-fallback"), "physical fallback");
                     Check(controller.Pending && displays.RestoreCount == 1 && displays.Physical, "fallback snapshot");
+                    Check(fixture.Watchdog.WaitForExit(5000) && !displays.Has("browser-repair-attempted"),
+                        "browser repair ran after physical fallback");
                     displays.Clear("fallback");
                     controller.Restore();
                     Until(() => Poll(controller, "restore-exact"), "retry exact");
@@ -373,11 +424,18 @@ namespace AgentSleep
 
             Case("independent restore after parent loss", (fixture, storage, displays) =>
             {
+                displays.Set("browser-hook");
+                displays.Set("browser-repair-throws");
                 Process owner = fixture.StartOwner("crash");
                 Until(() => displays.Has("owner-isolated"), "parent reached isolation");
                 StopChild(owner);
                 Until(() => Complete(storage, RecoveryReason.OwnerExit), "parent exit restore");
                 Check(displays.RestoreCount == 1 && displays.Physical, "parent exit topology");
+                Check(fixture.Watchdog.WaitForExit(5000) && fixture.Watchdog.ExitCode == 0 &&
+                    displays.Has("browser-repair-attempted") && !displays.Has("browser-repaired"),
+                    "browser callback failure affected the verified display result");
+                Check(File.ReadAllText(Path.ChangeExtension(storage.JournalPath, ".log")).Contains("BrowserRepair-Incomplete"),
+                    "browser failure diagnostic missing");
             });
 
             Case("independent restore after owner hang", (fixture, storage, displays) =>
@@ -416,7 +474,12 @@ namespace AgentSleep
             {
                 Guid id;
                 if (args.Length == 4 && Guid.TryParseExact(args[3], "N", out id))
-                    exitCode = RecoveryWorker.Watch(storage, displays, id, () => FakeWakeRequest.Acquire(storage, id, displays), TestTrial, 1000);
+                {
+                    Func<Func<bool>> capture = null;
+                    if (displays.Has("browser-hook")) capture = () => CaptureFakeBrowserRepair(storage, id, displays);
+                    exitCode = RecoveryWorker.Watch(storage, displays, id, () => FakeWakeRequest.Acquire(storage, id, displays),
+                        TestTrial, 1000, capture);
+                }
                 return true;
             }
 
@@ -445,6 +508,22 @@ namespace AgentSleep
                     Thread.Sleep(30);
                 }
             }
+        }
+
+        private static Func<bool> CaptureFakeBrowserRepair(RecoveryStorage storage, Guid id, FakeDisplays displays)
+        {
+            using (var signals = RecoverySignals.Open(storage, id, false))
+                Check(!signals.Ready.WaitOne(0) && storage.Read().Phase == RecoveryPhase.Prepared && !displays.WasChanged,
+                    "browser capture did not precede acknowledgment and display changes");
+            displays.Set("browser-captured");
+            return () =>
+            {
+                Check(displays.Physical && !displays.Has("wake-released"), "browser repair did not run on the restored awake desktop");
+                displays.Set("browser-repair-attempted");
+                if (displays.Has("browser-repair-throws")) throw new InvalidOperationException("simulated browser repair failure");
+                displays.Set("browser-repaired");
+                return true;
+            };
         }
 
         private static Process Launch(string command, string path, Guid scope, string argument)
@@ -565,7 +644,7 @@ namespace AgentSleep
                 return owner;
             }
 
-            internal Task<int> StartManualRestore(bool enterFirst = false)
+            internal Task<int> StartManualRestore(bool enterFirst = false, Action whileHoldingGate = null)
             {
                 Task<int> restore = Task.Factory.StartNew(() =>
                 {
@@ -573,7 +652,12 @@ namespace AgentSleep
                     using (var gate = Storage.OpenGate())
                     {
                         Check(RecoveryWorker.Enter(gate, 1000), "standalone reserved the gate before signaling the watchdog");
-                        try { return RecoveryWorker.RestoreCurrent(Storage, Displays); }
+                        try
+                        {
+                            int result = RecoveryWorker.RestoreCurrent(Storage, Displays);
+                            if (whileHoldingGate != null) whileHoldingGate();
+                            return result;
+                        }
                         finally { gate.ReleaseMutex(); }
                     }
                 });

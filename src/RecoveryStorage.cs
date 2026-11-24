@@ -240,6 +240,9 @@ namespace AgentSleep
                 Log("Requested-" + request);
         }
 
+        internal void LogBrowserCaptureFailure() { Log("BrowserCapture-Unavailable"); }
+        internal void LogBrowserRepair(bool verified) { Log(verified ? "BrowserRepair-Verified" : "BrowserRepair-Incomplete"); }
+
         private void Log(string code)
         {
             try
@@ -272,6 +275,7 @@ namespace AgentSleep
     internal sealed class RecoverySignals : IDisposable
     {
         internal EventWaitHandle Ready, Manual, Fence, Mutation, Pulse, Failed;
+        internal EventWaitHandle ExactAfterIsolation;
         private RecoverySignals() { }
 
         internal static RecoverySignals Open(RecoveryStorage storage, Guid id, bool create)
@@ -285,6 +289,14 @@ namespace AgentSleep
                 result.Mutation = Open(storage, id, "mutation", create);
                 result.Pulse = Open(storage, id, "pulse", create, EventResetMode.AutoReset);
                 result.Failed = Open(storage, id, "failed", create);
+                try
+                {
+                    if (create) result.ExactAfterIsolation = Open(storage, id, "exact", true);
+                    else EventWaitHandle.TryOpenExisting(storage.EventName(id, "exact"), out result.ExactAfterIsolation);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                catch (WaitHandleCannotBeOpenedException) { }
                 return result;
             }
             catch
@@ -303,9 +315,15 @@ namespace AgentSleep
 
         internal bool Cancelled { get { return Manual.WaitOne(0) || Fence.WaitOne(0); } }
 
+        internal void MarkExactAfterIsolation()
+        {
+            try { if (ExactAfterIsolation != null) ExactAfterIsolation.Set(); }
+            catch (Exception) { }
+        }
+
         public void Dispose()
         {
-            foreach (var signal in new[] { Ready, Manual, Fence, Mutation, Pulse, Failed })
+            foreach (var signal in new[] { Ready, Manual, Fence, Mutation, Pulse, Failed, ExactAfterIsolation })
                 if (signal != null) signal.Dispose();
         }
     }

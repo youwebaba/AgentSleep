@@ -32,8 +32,7 @@ namespace AgentSleep
                 string windowClass = name.ToString();
                 if (windowClass != "Chrome_WidgetWin_1" && windowClass != "MozillaWindowClass") return true;
 
-                int cloaked;
-                if (DwmGetWindowAttribute(hwnd, 14, out cloaked, sizeof(int)) == 0 && cloaked != 0) return true;
+                if (IsCloaked(hwnd)) return true;
                 uint owner;
                 uint thread = GetWindowThreadProcessId(hwnd, out owner);
                 if (thread == 0) return true;

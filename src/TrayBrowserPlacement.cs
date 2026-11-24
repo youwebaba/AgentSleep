@@ -26,13 +26,18 @@ namespace AgentSleep
                 Dictionary<Rectangle, string> physical = PhysicalLayout(displays);
                 foreach (KeyValuePair<IntPtr, BrowserWindow> browser in windows.Visible)
                 {
+                    if (!TrayWindow.IsUnlockedConsole()) { snapshot.physicalCaptureFailed = true; break; }
                     string displayId;
                     Monitor monitor;
                     if (!CurrentWindow(browser.Key, browser.Value) || !CanPlaceBrowser(browser.Value.ProcessId) ||
                         !ReadMonitor(MonitorFromWindow(browser.Key, 0), out monitor) ||
                         !physical.TryGetValue(monitor.Bounds.Rectangle, out displayId)) continue;
                     SavedPlacement saved = ReadPlacement(browser.Key, monitor, displayId);
-                    if (saved == null) { snapshot.physicalCaptureFailed = true; continue; }
+                    if (saved == null)
+                    {
+                        if (CurrentWindow(browser.Key, browser.Value)) snapshot.physicalCaptureFailed = true;
+                        continue;
+                    }
                     Rectangle visible = Rectangle.Intersect(saved.Geometry.Frame, saved.DisplayBounds);
                     if (saved.Geometry.Show == MinimizedShow || visible.Width < 120 || visible.Height < 80) continue;
                     saved.Identity = browser.Value;
@@ -55,10 +60,16 @@ namespace AgentSleep
                 {
                     if (!TrayWindow.IsUnlockedConsole()) return false;
                     Dictionary<Rectangle, string> physical = PhysicalLayout(displays);
+                    if (!TrayWindow.IsUnlockedConsole()) return false;
                     BrowserInventory live = Read();
                     bool verified = true;
                     foreach (KeyValuePair<IntPtr, SavedPlacement> entry in physicalPlacements)
                     {
+                        if (clock.ElapsedMilliseconds >= 2000 || !TrayWindow.IsUnlockedConsole())
+                        {
+                            focus.Preserve();
+                            return false;
+                        }
                         IntPtr handle = entry.Key;
                         SavedPlacement original = entry.Value;
                         BrowserWindow observed;
@@ -100,7 +111,7 @@ namespace AgentSleep
             PlacementGeometry expected = original.Geometry;
             expected.Normal.Offset(adjustment);
             PlacementAction action = DecidePlacement(expected, observed.Geometry);
-            if (action == PlacementAction.Verified) return true;
+            if (action == PlacementAction.Verified) return CurrentWindow(handle, original.Identity);
             if (!TrayWindow.IsUnlockedConsole() || !CurrentWindow(handle, original.Identity) || !IsWindowVisible(handle) || IsCloaked(handle)) return false;
 
             if (action == PlacementAction.Show) RestoreWithoutActivating(handle, original.Identity);
@@ -215,10 +226,11 @@ namespace AgentSleep
 
             internal void Preserve()
             {
+                if (!TrayWindow.IsUnlockedConsole()) return;
                 uint tick, lastInput, currentProcess;
                 IntPtr foreground = GetForegroundWindow();
                 if (inputKnown && ownerThread != 0 && foreground != original && requested.Contains(foreground) &&
-                    TrayWindow.IsUnlockedConsole() && TrayWindow.TryGetLastInput(out tick, out lastInput) && input == lastInput &&
+                    TrayWindow.TryGetLastInput(out tick, out lastInput) && input == lastInput &&
                     GetWindowThreadProcessId(original, out currentProcess) == ownerThread && process == currentProcess &&
                     IsWindowVisible(original) && !IsIconic(original)) SetForegroundWindow(original);
             }

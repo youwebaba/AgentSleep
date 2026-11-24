@@ -4,6 +4,12 @@ AgentSleep is a standalone Windows 11 tray app for desktop agents. It moves the 
 
 **Start with the read-only build.** On a three-monitor PC, all three physical panels stayed in standby while Codex clicked and typed in Edge. The first trial also showed why recovery must disconnect the virtual display after the physical monitors return. [Attended hardware results](docs/desktop-trial.md)
 
+## Install on Windows
+
+Download and run `AgentSleep-Setup-v1.0-windows-x64.exe` on Windows 11 x64. Setup installs AgentSleep for the current account in `%LOCALAPPDATA%\Programs\AgentSleep` and adds a Start menu entry. To uninstall, restore the displays, exit AgentSleep, then select **AgentSleep** in **Settings → Apps → Installed apps**. [AgentSleep v1.0 release](https://github.com/youwebaba/AgentSleep/releases/tag/v1.0)
+
+Install and enable the supported signed virtual display driver separately, then run the included `AgentSleep.DryRun.exe` in PowerShell from the install folder and inspect its results before starting a session. [Driver prerequisite](#driver-prerequisite)
+
 ## Read-only build
 
 Run [AgentSleep.DryRun.exe](builds/windows-x64/AgentSleep.DryRun.exe) from PowerShell on the local Windows desktop. The executable can inspect and validate a proposed display configuration. It has no command for applying one.
@@ -22,7 +28,9 @@ To build from source and run the mocked display and recovery tests, use a Window
 
 ## Tray build
 
-After reviewing the dry run, open [AgentSleep.exe](builds/windows-x64/AgentSleep.exe). **Start now** begins manual setup. The first session for a target requires local confirmation and a timed rollback. **Restore displays**, the restore hotkey and the independent watchdog all bring the physical monitors back first, verify their layout, then disconnect the selected virtual display. The driver stays installed. Startup with Windows and idle entry both default to off.
+After reviewing the dry run, launch **AgentSleep** from Start or open the [portable tray executable](builds/windows-x64/AgentSleep.exe). Right-click the tray icon and choose **Start now**. If Windows lists several verified virtual displays, choose one in **Settings**. The first session for a target requires local confirmation and a timed rollback. **Restore displays**, the restore hotkey and the independent watchdog bring the physical monitors back first, verify their layout, then disconnect the selected virtual display. The driver stays installed.
+
+The restore hotkey defaults to **Ctrl+Alt+F11**. Idle entry and startup at sign-in are off by default. If you enable idle entry, its default interval is 10 minutes. Use **Settings** to change these options or **Pause timer** to suspend automatic entry for the current run.
 
 To open **Start now** on your primary screen, run `AgentSleep.exe --prompt`. Opening the prompt leaves the displays as they are until you choose **Start now**. Escape cancels.
 
@@ -31,6 +39,14 @@ To build the tray app and run all native-project tests from the repository root,
 ```powershell
 .\build.ps1 -Test
 ```
+
+To build the v1.0 installer, run the packaging script from the repository root with PowerShell 7 and NSIS installed. Pass `-MakeNsis` with the path to `makensis.exe` if needed. The output is `build\AgentSleep-Setup-v1.0-windows-x64.exe`.
+
+```powershell
+pwsh -NoProfile -File .\installer\build-installer.ps1
+```
+
+Run `pwsh -NoProfile -File .\installer\test-installer.ps1` to smoke-test setup and uninstall from a Windows account with no existing AgentSleep installation, Start menu folder, or uninstall registration.
 
 Read the [tray and keyboard recovery guide](docs/tray-and-recovery.md) before the first switch. The [three-condition trial](docs/desktop-trial.md) uses a [self-contained browser fixture](fixture/index.html). Open the HTML file from a local checkout so the browser runs it as a page.
 
@@ -57,3 +73,9 @@ The original Python discovery tool and its tests remain under [prototype](protot
 The [attended trial record](docs/desktop-trial.md) includes event times, operator observations, the five-second return, and window-placement corrections.
 
 The previously reported clicks that appeared to take effect at wake, and a separate successful screenshot, are observations from before this build. The fixture records when the browser actually receives input so those timestamps can be compared with physical panel observations.
+
+## License
+
+AgentSleep is licensed under the PolyForm Noncommercial License 1.0.0. It permits use and modification for noncommercial purposes and the other uses it specifies, including use by certain organizations regardless of funding. Commercial use outside those permissions requires a separate license. Redistribution requires passing along the license text or its URL and any required notices. [License text](LICENSE) · [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0)
+
+The separately installed Virtual Display Driver project uses the MIT License. [Virtual Display Driver license](https://github.com/VirtualDrivers/Virtual-Display-Driver/blob/25.7.23/LICENSE)

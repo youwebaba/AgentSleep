@@ -4,7 +4,7 @@
 
 Use the local, unlocked Windows 11 x64 desktop. Sign in normally. Run the [read-only check](../README.md#read-only-build) first. The tray app runs with your current Windows account. Driver installation is a separate operator task.
 
-1. Put [AgentSleep.exe](../builds/windows-x64/AgentSleep.exe) somewhere you can keep it. Write down its full path and the restore hotkey. The independent watchdog starts another copy of this executable from the same location.
+1. Run the [Windows installer](../README.md#install-on-windows) or put the [portable AgentSleep.exe](../builds/windows-x64/AgentSleep.exe) somewhere you can keep it. Write down its full path and the restore hotkey. The installer uses `%LOCALAPPDATA%\Programs\AgentSleep\AgentSleep.exe`. The independent watchdog starts another copy of this executable from the same location.
 2. Open the app and find **AgentSleep** in the system tray. Its icon may be under the overflow arrow. Open **Settings** to choose a verified virtual target, an idle timeout and a restore hotkey. Start with the idle timer and startup at sign-in off.
 3. Use **Status** to check eligibility and the registered hotkey. Multiple verified virtual targets require a selection. Cloned desktops, an unidentifiable active target or an ambiguous primary can prevent the app from recording an exact recovery plan.
 4. Open the [local fixture](../fixture/index.html) in a visible browser window. With someone at the PC to observe every monitor, choose **Start now** and approve the timed trial. Let the watchdog restore the display layout. The 25-second budget starts when the helper acknowledges the snapshot and includes the switch itself.
@@ -31,10 +31,10 @@ An enabled timer uses the current session’s Windows last-input time. Input fro
 ## Restore using the keyboard
 
 1. Press the registered restore hotkey. The default is **Ctrl + Alt + F11**. During the first trial, the watchdog also attempts restoration automatically. Leave it running if the tray process is lost.
-2. If the tray is gone or the hotkey is unavailable, press **Win + R** and type the quoted full path to `AgentSleep.exe` followed by ` --restore`. Press **Enter**. From a PowerShell prompt in a checkout, use the following command to wait for the result.
+2. If the tray is gone or the hotkey is unavailable, press **Win + R** and type the quoted full path to `AgentSleep.exe` followed by ` --restore`. Press **Enter**. Use this command in PowerShell to wait for the result from an installed copy. For the portable app, substitute its path.
 
    ```powershell
-   (Start-Process -FilePath .\builds\windows-x64\AgentSleep.exe -ArgumentList '--restore' -Wait -PassThru).ExitCode
+   (Start-Process -FilePath "$env:LOCALAPPDATA\Programs\AgentSleep\AgentSleep.exe" -ArgumentList '--restore' -Wait -PassThru).ExitCode
    ```
 
    `0` means exact restoration or no outstanding snapshot. `3` means a currently available physical display was recovered and the saved layout still needs attention. `2` means the requested operation failed. Repeat the command after reconnecting the original monitors. Keep the recovery file while a restore is pending.

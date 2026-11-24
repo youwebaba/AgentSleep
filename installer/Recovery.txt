@@ -1,0 +1,26 @@
+AgentSleep v1.0 display recovery
+
+Install and enable the signed VirtualDrivers Virtual Display Driver 25.7.23
+driver-only package separately. The vendor's Windows x64 asset is named
+VirtualDisplayDriver-x86.Driver.Only.zip. Keep Windows signature enforcement on.
+https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/tag/25.7.23
+
+Run AgentSleep.DryRun.exe from a local PowerShell to check the layout. Stay at
+the PC with your physical monitors powered on for the first timed trial.
+
+To restore the displays, press the registered restore hotkey. The default is
+Ctrl+Alt+F11 and you can find the current shortcut in the tray's Status panel.
+You can also use Restore displays from the tray menu.
+
+If the tray is unavailable, open Restore AgentSleep Displays from the AgentSleep
+Start menu folder. It runs AgentSleep.exe --restore for the saved local session.
+Keep your physical monitors powered on and wait for Windows to restore them.
+Leave the independent watchdog running so it can finish recovery.
+
+If the original layout is still pending, power on or reconnect the original
+monitors and retry the restore shortcut from the unlocked local desktop. If
+Windows restored a fallback layout, check your displays before starting again.
+
+Before uninstalling, restore the physical desktop and exit the installed tray.
+The uninstaller preserves AgentSleep settings and recovery data in
+%LOCALAPPDATA%\AgentSleep. The virtual driver is managed separately in Windows.

@@ -95,6 +95,7 @@ namespace AgentSleep
                 id != DisplayTrust.StableId("different-adapter", monitor), "identity comes from both device interfaces");
 
             SelectedRestore(original);
+            RestoreStability(original);
         }
 
         private static void SelectedRestore(DisplayLayout[] physical)
@@ -116,8 +117,8 @@ namespace AgentSleep
                 var expected = saved.Concat(new[] { added }).ToArray();
                 var current = Observed(new[] { selected.AtPosition(0, 0), added });
                 int phases = 0;
-                bool settled = false;
-                string result = NativeDisplays.RestoreSelected(layouts, selectedId, () => current,
+                var clock = new RestoreTestClock();
+                string result = SimulatedRestore(layouts, selectedId, () => current,
                     (before, proposed, verify, action) =>
                     {
                         Require(before == current, "restore transitions use freshly read state");
@@ -129,14 +130,14 @@ namespace AgentSleep
                         }
                         else
                         {
-                            Require(settled && DisplayLayout.Exact(expected, proposed) &&
+                            Require(clock.Milliseconds >= 5500 && DisplayLayout.Exact(expected, proposed) &&
                                 before.Layouts.Any(l => l.Id == selectedId),
                                 "phase two detaches only the selected target after verified physical readback");
                         }
                         current = Observed(proposed);
                         Require(verify(current), "phase readback predicate");
                         return current;
-                    }, () => { settled = true; });
+                    }, clock);
                 Require(result == "exact" && phases == 2 && DisplayLayout.Exact(expected, current.Layouts),
                     "two-phase exact rollback from virtual-only with selected originally active or inactive");
             }
@@ -147,69 +148,137 @@ namespace AgentSleep
             Require(DisplayBaseline.Decode(DisplayBaseline.Encode(otherPrimary, selected.Id), out selectedId).Length == 2,
                 "unrelated primary remains allowed");
             var alternatePrimary = Observed(new[] { selected.AtPosition(0, 0) });
-            Require(NativeDisplays.RestoreSelected(otherPrimary, selected.Id, () => alternatePrimary,
+            Require(SimulatedRestore(otherPrimary, selected.Id, () => alternatePrimary,
                 (before, proposed, verify, action) =>
                 {
                     alternatePrimary = Observed(proposed);
                     Require(verify(alternatePrimary), "unrelated primary and original physical monitor verified");
                     return alternatePrimary;
-                }, () => { }) == "exact" && alternatePrimary.Layouts.Single(l => l.Origin).Id == unrelated.Id,
+                }) == "exact" && alternatePrimary.Layouts.Single(l => l.Origin).Id == unrelated.Id,
                 "two-stage restoration preserves a nonselected virtual primary");
 
             var unavailable = Observed(new[] { selected.AtPosition(0, 0) });
             int tried = 0;
             try
             {
-                NativeDisplays.RestoreSelected(saved, selected.Id, () => unavailable, (before, proposed, verify, action) =>
+                SimulatedRestore(saved, selected.Id, () => unavailable, (before, proposed, verify, action) =>
                 {
                     tried++;
                     Require(proposed.Any(l => l.Id == selected.Id) && !verify(unavailable),
                         "no detach without physically available originals");
                     return null;
-                }, () => { throw new Exception("Unverified physical phase must not reach detach."); });
+                });
                 throw new Exception("No physical output must leave rollback pending.");
             }
             catch (InvalidOperationException) { Require(tried == 1, "unavailable physical layout attempts bridge only"); }
 
             var existing = Observed(saved.Concat(new[] { selected }).ToArray());
-            string fallback = NativeDisplays.RestoreSelected(saved, selected.Id, () => existing,
+            int failedDetaches = 0;
+            string fallback = SimulatedRestore(saved, selected.Id, () => existing,
                 (before, proposed, verify, action) =>
                 {
+                    failedDetaches++;
                     Require(DisplayLayout.Exact(saved, proposed), "detach attempts only the verified original layout");
                     Require(!verify(existing), "failed removal cannot report exact success");
                     return null;
-                }, () => { });
-            Require(fallback == "physical-fallback" && existing.Layouts.Any(l => l.Id == selected.Id),
-                "failed detach retains the active virtual alongside verified physical displays for retry");
+                });
+            Require(fallback == "physical-fallback" && existing.Layouts.Any(l => l.Id == selected.Id) && failedDetaches == 2,
+                "failed detach retries once and retains the active virtual alongside verified physical displays");
 
-            NativeDisplays.State afterUnplug = existing;
-            fallback = NativeDisplays.RestoreSelected(saved, selected.Id, () => afterUnplug,
-                (before, proposed, verify, action) => { throw new Exception("Hot-unplug must abort detach."); },
-                () => { afterUnplug = Observed(new[] { physical[0], selected, unrelated }); });
+            var unplugClock = new RestoreTestClock();
+            NativeDisplays.State afterUnplug = Observed(new[] { physical[0], selected, unrelated });
+            fallback = SimulatedRestore(saved, selected.Id, () => unplugClock.Milliseconds == 0 ? existing : afterUnplug,
+                (before, proposed, verify, action) => { throw new Exception("Hot-unplug must abort detach."); }, unplugClock);
             Require(fallback == "physical-fallback", "fresh read fails closed after a monitor unplugs before detach");
 
             var conflictingPrimary = Observed(new[] { Layout('F', 0, 0), selected });
-            Require(NativeDisplays.RestoreSelected(saved, selected.Id, () => conflictingPrimary,
-                (before, proposed, verify, action) => { throw new Exception("Conflicting new primary must remain active."); },
-                () => { }) == "physical-fallback", "unrelated output at the saved primary position causes safe fallback");
+            Require(SimulatedRestore(saved, selected.Id, () => conflictingPrimary,
+                (before, proposed, verify, action) => { throw new Exception("Conflicting new primary must remain active."); })
+                == "physical-fallback", "unrelated output at the saved primary position causes safe fallback");
 
             var alreadyNormal = Observed(saved);
-            Require(NativeDisplays.RestoreSelected(saved, selected.Id, () => alreadyNormal,
+            var alreadyNormalClock = new RestoreTestClock();
+            Require(SimulatedRestore(saved, selected.Id, () => alreadyNormal,
                 (before, proposed, verify, action) => { throw new Exception("Idempotent recovery must not switch."); },
-                () => { throw new Exception("No virtual target to detach."); }) == "exact",
-                "already inactive target is not reactivated");
+                alreadyNormalClock) == "exact" && alreadyNormalClock.Milliseconds >= 5500,
+                "an already inactive target is not reactivated and the result still settles before commit");
 
             var onlyPrimary = Observed(new[] { physical[0] });
-            Require(NativeDisplays.RestoreSelected(saved, selected.Id, () => onlyPrimary,
+            Require(SimulatedRestore(saved, selected.Id, () => onlyPrimary,
                 (before, proposed, verify, action) =>
                 {
                     Require(DisplayLayout.Exact(saved, proposed), "inactive selected target is never reactivated for recovery");
                     onlyPrimary = Observed(proposed);
                     Require(verify(onlyPrimary), "readback after restoration without selected target");
                     return onlyPrimary;
-                }, () => { throw new Exception("No virtual phase is needed if the target disappeared."); }) == "exact",
+                }) == "exact",
                 "restore missing originals directly if the selected target is already detached");
         }
+
+        private static void RestoreStability(DisplayLayout[] physical)
+        {
+            DisplayLayout selected = Layout('E', 5120, 0);
+            selected.Kind = DisplayKind.Virtual;
+            var bridge = Observed(physical.Concat(new[] { selected }).ToArray());
+            var normal = Observed(physical);
+            var partial = Observed(new[] { physical[0], selected });
+            NativeDisplays.State unknown = Observed(new[] { physical[0], physical[1], selected });
+            unknown.Layouts[1] = null;
+            var clock = new RestoreTestClock();
+            var detachedAt = new List<long>();
+            Func<NativeDisplays.State> read = () =>
+            {
+                long time = clock.Milliseconds;
+                if (detachedAt.Count == 0)
+                    return time >= 1000 && time < 4500 ? partial : bridge;
+                if (detachedAt.Count >= 2) return normal;
+                long sinceDetach = time - detachedAt[0];
+                if (sinceDetach < 750) return normal;
+                if (sinceDetach < 2000) return unknown;
+                if (sinceDetach < 3000) throw new InvalidOperationException("Simulated CCD adapter re-enumeration.");
+                return sinceDetach < 4500 ? partial : bridge;
+            };
+            string result = SimulatedRestore(physical, selected.Id, read, (prior, proposed, verify, action) =>
+            {
+                Require(prior == bridge && DisplayLayout.Exact(proposed, physical) && verify(normal),
+                    "only detach a trusted virtual monitor after all original layouts read back");
+                detachedAt.Add(clock.Milliseconds);
+                return normal;
+            }, clock);
+            Require(result == "exact" && detachedAt.Count == 2 && detachedAt[0] >= 10000 &&
+                detachedAt[1] - detachedAt[0] >= 10000 && clock.Milliseconds - detachedAt[1] >= 5500,
+                "late VDD reappearance after 4.5 seconds of monitor churn gets one verified redetach and a full final dwell");
+
+            var changedPrimary = Observed(new[] { physical[0], physical[1], physical[2].AtPosition(-2560, 0), selected });
+            var timeout = new RestoreTestClock();
+            int requests = 0;
+            result = SimulatedRestore(physical, selected.Id, () => requests == 0 ? bridge : changedPrimary,
+                (prior, proposed, verify, action) => { requests++; return null; }, timeout);
+            Require(result == "physical-fallback" && requests == 1 && timeout.Milliseconds == 35000,
+                "lasting layout drift keeps rollback pending and never triggers a second detach");
+
+            var retry = new RestoreTestClock();
+            var checkpoint = bridge;
+            result = SimulatedRestore(physical, selected.Id, () => checkpoint, (prior, proposed, verify, action) =>
+            {
+                checkpoint = normal;
+                Require(verify(checkpoint), "retry reads back the exact physical layout");
+                return checkpoint;
+            }, retry);
+            Require(result == "exact" && retry.Milliseconds >= 11000,
+                "explicit retry can finish once physical layout and selected virtual are stable");
+        }
+
+        private static string SimulatedRestore(DisplayLayout[] saved, string selectedId, Func<NativeDisplays.State> read,
+            Func<NativeDisplays.State, DisplayLayout[], Func<NativeDisplays.State, bool>, string, NativeDisplays.State> change,
+            RestoreTestClock clock = null)
+        {
+            if (clock == null) clock = new RestoreTestClock();
+            return NativeDisplays.RestoreSelected(saved, selectedId, read, change,
+                () => clock.Milliseconds, milliseconds => { clock.Milliseconds += milliseconds; });
+        }
+
+        private sealed class RestoreTestClock { internal long Milliseconds; }
 
         private static NativeDisplays.State Observed(DisplayLayout[] layouts)
         {

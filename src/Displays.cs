@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 
@@ -7,6 +8,11 @@ namespace AgentSleep
 {
     internal sealed class NativeDisplays : IDisplays
     {
+        private const int RestorePollMs = 250;
+        private const int RestoreStableMs = 5500;
+        private const int RestoreDeadlineMs = 35000;
+        private const int RestoreMaximumSampleGapMs = 1000;
+        private const int RestoreDetachAttempts = 2;
         private DisplayLayout[] extended;
         private string extendedTarget;
 
@@ -99,10 +105,13 @@ namespace AgentSleep
             string selectedId;
             DisplayLayout[] saved = DisplayBaseline.Decode(baseline, out selectedId);
             if (selectedId != null)
-                return RestoreSelected(saved, selectedId, () => Read(true), SwitchAndVerify, () => Thread.Sleep(350));
+            {
+                Stopwatch clock = Stopwatch.StartNew();
+                return RestoreSelected(saved, selectedId, () => Read(true), SwitchAndVerify, () => clock.ElapsedMilliseconds, Thread.Sleep);
+            }
 
             State current = Read(true);
-            if (DisplayLayout.Exact(saved, current.Layouts)) return "exact";
+            if (NormalRestored(current, saved)) return VerifyLegacyRestore(current, saved);
 
             Plan exact = FindExactPlan(current, saved);
             if (exact != null)
@@ -110,20 +119,19 @@ namespace AgentSleep
                 try
                 {
                     Apply(exact, current, "restore the saved desktop");
-                    WaitFor(s => DisplayLayout.Exact(saved, s.Layouts));
-                    return "exact";
+                    current = WaitFor(s => NormalRestored(s, saved));
                 }
                 catch (InvalidOperationException)
                 {
                     current = Read(true);
-                    if (DisplayLayout.Exact(saved, current.Layouts)) return "exact";
                 }
+                if (NormalRestored(current, saved)) return VerifyLegacyRestore(current, saved);
             }
 
             var attempted = new HashSet<string>();
             while (attempted.Count < 8)
             {
-                if (DisplayLayout.Exact(saved, current.Layouts)) return "exact";
+                if (NormalRestored(current, saved)) return VerifyLegacyRestore(current, saved);
                 if (HasUsablePhysicalDesktop(current)) return "physical-fallback";
                 Plan fallback = FindPhysicalPlan(current, saved, attempted);
                 if (fallback == null) break;
@@ -131,15 +139,16 @@ namespace AgentSleep
                 try
                 {
                     Apply(fallback, current, "bring back a connected physical display");
-                    State verified = WaitFor(HasUsablePhysicalDesktop);
-                    return DisplayLayout.Exact(saved, verified.Layouts) ? "exact" : "physical-fallback";
+                    current = WaitFor(HasUsablePhysicalDesktop);
                 }
                 catch (InvalidOperationException)
                 {
                     current = Read(true);
+                    continue;
                 }
+                return NormalRestored(current, saved) ? VerifyLegacyRestore(current, saved) : "physical-fallback";
             }
-            if (DisplayLayout.Exact(saved, current.Layouts)) return "exact";
+            if (NormalRestored(current, saved)) return VerifyLegacyRestore(current, saved);
             if (HasUsablePhysicalDesktop(current)) return "physical-fallback";
             throw new InvalidOperationException("Windows could not restore the saved layout or validate a connected physical display. Wake or reconnect a monitor and retry Restore.");
         }
@@ -154,44 +163,113 @@ namespace AgentSleep
         }
 
         internal static string RestoreSelected(DisplayLayout[] saved, string selectedId, Func<State> read,
-            Func<State, DisplayLayout[], Func<State, bool>, string, State> change, Action settle)
+            Func<State, DisplayLayout[], Func<State, bool>, string, State> change, Func<long> now, Action<int> pause)
         {
-            State current = read();
-            DisplayLayout[] live = CaptureLayouts(current);
+            long deadline = now() + RestoreDeadlineMs;
+            State current = ReadDuringRestore(read);
+            while (now() < deadline && (current == null || current.Layouts.Any(l => l == null) || !SeparateSources(current)))
+            {
+                pause(RestorePollMs);
+                current = ReadDuringRestore(read);
+            }
+            if (now() >= deadline) return UnstableRestore(current);
+
+            DisplayLayout[] live = current.Layouts;
             DisplayLayout[] final = saved.Where(l => l.Id != selectedId)
                 .Concat(live.Where(l => l.Id != selectedId && !saved.Any(s => s.Id == l.Id))).ToArray();
             if (final.GroupBy(l => new { l.Source.X, l.Source.Y }).Any(g => g.Count() != 1))
                 return RestoreAlongsideFallback(current, saved, read, change);
-            if (DisplayLayout.Exact(final, live)) return "exact";
 
-            if (current.Active.Any(r => r.Id == selectedId))
+            if (!NormalRestored(current, final) && !ReadyToDetach(current, final, selectedId))
             {
-                Route target = SelectVirtual(current, selectedId).Single(r => r.Path.IsActive);
-                if (!ReadyToDetach(current, final, selectedId))
+                if (current.Active.Any(r => r.Id == selectedId))
                 {
+                    Route target = SelectVirtual(current, selectedId).Single(r => r.Path.IsActive);
                     Ccd.SourceMode anchor = Rightmost(final);
                     DisplayLayout relocated = target.Layout.AtPosition(checked(anchor.X + (int)anchor.Width), anchor.Y);
                     DisplayLayout[] bridge = final.Concat(new[] { relocated }).ToArray();
-                    current = change(current, bridge, s => ReadyToDetach(s, final, selectedId),
-                        "restore the saved desktop alongside the virtual display") ?? read();
-                    if (!ReadyToDetach(current, final, selectedId))
-                        return RestoreAlongsideFallback(current, saved, read, change);
+                    change(current, bridge, s => ReadyToDetach(s, final, selectedId),
+                        "restore the saved desktop alongside the virtual display");
                 }
-
-                // Give Windows a chance to process the expansion before it receives the detach.
-                settle();
-                current = read();
-                if (NormalRestored(current, final)) return "exact";
-                if (!ReadyToDetach(current, final, selectedId))
-                    return RestoreAlongsideFallback(current, saved, read, change);
-                SelectVirtual(current, selectedId);
+                else
+                {
+                    change(current, final, s => NormalRestored(s, final), "restore the saved desktop");
+                }
+                current = ReadDuringRestore(read);
             }
 
-            if (change(current, final, s => NormalRestored(s, final),
-                "finish restoring the saved desktop with the selected virtual display detached") != null) return "exact";
-            current = read();
-            if (NormalRestored(current, final)) return "exact";
-            return RestoreAlongsideFallback(current, saved, read, change);
+            return WaitForRestoreStability(current, final, selectedId, read, change, now, pause, deadline);
+        }
+
+        private static string VerifyLegacyRestore(State current, DisplayLayout[] final)
+        {
+            var clock = Stopwatch.StartNew();
+            return WaitForRestoreStability(current, final, null, () => Read(true), SwitchAndVerify,
+                () => clock.ElapsedMilliseconds, Thread.Sleep, RestoreDeadlineMs);
+        }
+
+        private static string WaitForRestoreStability(State current, DisplayLayout[] final, string selectedId, Func<State> read,
+            Func<State, DisplayLayout[], Func<State, bool>, string, State> change, Func<long> now, Action<int> pause, long deadline)
+        {
+            long since = 0, previousSample = 0;
+            RestoreObservation previous = RestoreObservation.Unknown;
+            int detaches = 0;
+            while (now() <= deadline)
+            {
+                long sample = now();
+                RestoreObservation observation = ObserveRestore(current, final, selectedId);
+                if (observation != previous || sample - previousSample > RestoreMaximumSampleGapMs) since = sample;
+                previous = observation;
+                previousSample = sample;
+                if (sample - since >= RestoreStableMs)
+                {
+                    if (observation == RestoreObservation.Final) return "exact";
+                    if (observation == RestoreObservation.WithVirtual && detaches < RestoreDetachAttempts &&
+                        deadline - sample >= RestoreStableMs)
+                    {
+                        detaches++;
+                        change(current, final, s => NormalRestored(s, final),
+                            "finish restoring the saved desktop with the selected virtual display detached");
+                        previous = RestoreObservation.Unknown;
+                    }
+                }
+                long remaining = deadline - now();
+                if (remaining <= 0) break;
+                pause((int)Math.Min(RestorePollMs, remaining));
+                current = ReadDuringRestore(read);
+            }
+            return UnstableRestore(current);
+        }
+
+        private enum RestoreObservation { Unknown, WithVirtual, Final }
+
+        private static RestoreObservation ObserveRestore(State current, DisplayLayout[] final, string selectedId)
+        {
+            if (current == null) return RestoreObservation.Unknown;
+            if (NormalRestored(current, final)) return RestoreObservation.Final;
+            if (selectedId != null && ReadyToDetach(current, final, selectedId))
+            {
+                try
+                {
+                    if (SelectVirtual(current, selectedId).Count(r => r.Path.IsActive) == 1)
+                        return RestoreObservation.WithVirtual;
+                }
+                catch (InvalidOperationException) { }
+            }
+            return RestoreObservation.Unknown;
+        }
+
+        private static State ReadDuringRestore(Func<State> read)
+        {
+            try { return read(); }
+            catch (InvalidOperationException) { return null; }
+        }
+
+        private static string UnstableRestore(State current)
+        {
+            if (current != null && current.Layouts.Any(l => l != null && l.Kind == DisplayKind.Physical))
+                return "physical-fallback";
+            throw new InvalidOperationException("Windows did not verify a stable restored desktop. Wake or reconnect the original monitors and retry Restore.");
         }
 
         private static bool NormalRestored(State state, DisplayLayout[] expected)

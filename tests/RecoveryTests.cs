@@ -88,6 +88,97 @@ namespace AgentSleep
                 }
             });
 
+            Case("watchdog keeps its wake request while joining standalone restore", (fixture, storage, displays) =>
+            {
+                using (var controller = fixture.Controller())
+                {
+                    controller.Start(Target, false);
+                    Check(controller.State == "active", controller.Detail);
+                    displays.Set("hold-restore");
+                    Task<int> standalone = fixture.StartManualRestore(enterFirst: true);
+                    try
+                    {
+                        Until(() => displays.Has("restore-entered"), "standalone began restoring");
+                        Check(!fixture.Watchdog.WaitForExit(2300) && !displays.Has("wake-released"),
+                            "watchdog exited and released its power request before standalone finished");
+                        controller.Poll();
+                        Check(controller.State == "restoring" && !controller.QueuedRestorePending,
+                            "tray started another restore during standalone recovery");
+                    }
+                    finally { displays.Set("release-restore"); }
+
+                    Check(standalone.Wait(5000) && standalone.Result == 0, "standalone exact exit");
+                    Check(fixture.Watchdog.WaitForExit(5000) && fixture.Watchdog.ExitCode == 0 && displays.Has("wake-released"),
+                        "watchdog did not report exact or release its power request afterward");
+                    Until(() => Poll(controller, "restore-exact"), "standalone exact result");
+                    Check(displays.RestoreCount == 1 && displays.Physical, "competing watchdog restored twice");
+                }
+            });
+
+            Case("standalone joins watchdog fallback and failure", (fixture, storage, displays) =>
+            {
+                var outcomes = new[] {
+                    new { Marker = "fallback", ExitCode = 3, Detail = "physical-fallback" },
+                    new { Marker = "restore-fails", ExitCode = 2, Detail = "restore-failed" }
+                };
+                using (var controller = fixture.Controller())
+                {
+                    foreach (var outcome in outcomes)
+                    {
+                        int previous = displays.RestoreCount;
+                        displays.Clear("restore-entered");
+                        displays.Clear("release-restore");
+                        displays.Set(outcome.Marker);
+                        displays.Set("hold-restore");
+                        controller.Start(Target, false);
+                        Check(controller.State == "active", controller.Detail);
+                        controller.Restore(RecoveryRequest.Hotkey);
+                        Task<int> standalone;
+                        try
+                        {
+                            Until(() => displays.Has("restore-entered"), "watchdog began restoring");
+                            standalone = fixture.StartManualRestore();
+                            Check(!standalone.Wait(2300), "standalone returned before watchdog finished");
+                        }
+                        finally { displays.Set("release-restore"); }
+
+                        Check(standalone.Wait(5000) && standalone.Result == outcome.ExitCode, "standalone exit after " + outcome.Detail);
+                        Until(() => Poll(controller, outcome.Detail), outcome.Detail);
+                        Check(displays.RestoreCount == previous + 1, "competing standalone repeated " + outcome.Detail);
+
+                        displays.Clear(outcome.Marker);
+                        displays.Clear("hold-restore");
+                        controller.Restore(RecoveryRequest.TrayRestore);
+                        Until(() => Poll(controller, "restore-exact"), "explicit retry after " + outcome.Detail);
+                        Check(displays.RestoreCount == previous + 2, "explicit retry was not performed exactly once");
+                    }
+                }
+            });
+
+            Case("watchdog loss does not interrupt an active independent restore", (fixture, storage, displays) =>
+            {
+                using (var controller = fixture.Controller())
+                {
+                    controller.Start(Target, false);
+                    Check(controller.State == "active", controller.Detail);
+                    displays.Set("hold-restore");
+                    Task<int> standalone = fixture.StartManualRestore(enterFirst: true);
+                    try
+                    {
+                        Until(() => displays.Has("restore-entered"), "standalone began restoring without its watcher");
+                        StopChild(fixture.Watchdog);
+                        controller.Poll();
+                        Check(controller.State == "restoring" && !controller.QueuedRestorePending,
+                            "watchdog loss queued a second restore while standalone owned the gate");
+                    }
+                    finally { displays.Set("release-restore"); }
+
+                    Check(standalone.Wait(5000) && standalone.Result == 0, "independent restore finished");
+                    Until(() => Poll(controller, "restore-exact"), "independent result after watchdog loss");
+                    Check(displays.RestoreCount == 1, "watchdog loss duplicated the independent restore");
+                }
+            });
+
             Case("restore request logs distinguish hotkey, desktop check, tray and standalone", (fixture, storage, displays) =>
             {
                 string log = Path.ChangeExtension(storage.JournalPath, ".log");
@@ -474,9 +565,18 @@ namespace AgentSleep
                 return owner;
             }
 
-            internal Task<int> StartManualRestore()
+            internal Task<int> StartManualRestore(bool enterFirst = false)
             {
-                Task<int> restore = Task.Factory.StartNew(() => RecoveryWorker.RestoreCurrent(Storage, Displays));
+                Task<int> restore = Task.Factory.StartNew(() =>
+                {
+                    if (!enterFirst) return RecoveryWorker.RestoreCurrent(Storage, Displays);
+                    using (var gate = Storage.OpenGate())
+                    {
+                        Check(RecoveryWorker.Enter(gate, 1000), "standalone reserved the gate before signaling the watchdog");
+                        try { return RecoveryWorker.RestoreCurrent(Storage, Displays); }
+                        finally { gate.ReleaseMutex(); }
+                    }
+                });
                 restores.Add(restore);
                 return restore;
             }
@@ -597,6 +697,11 @@ namespace AgentSleep
             {
                 CheckWakeRequest();
                 Record("restore");
+                if (Has("hold-restore"))
+                {
+                    Set("restore-entered");
+                    Until(() => Has("release-restore"), "release long simulated restoration");
+                }
                 Check(HasSelectedTarget(baseline) && !Has("restore-fails"), "invalid or unbound restore snapshot");
                 Topology("physical");
                 return Has("fallback") ? "physical-fallback" : "exact";

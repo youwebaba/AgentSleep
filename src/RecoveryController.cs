@@ -12,6 +12,7 @@ namespace AgentSleep
         internal const int ArmMilliseconds = 5000;
         private const int HeartbeatMilliseconds = 8000;
         private const int GateGrace = 2000;
+        private const int RestoreJoinMilliseconds = 40000; // The display backend allows 35 seconds for stabilization.
 
         internal static bool Enter(Mutex gate, int milliseconds)
         {
@@ -19,7 +20,7 @@ namespace AgentSleep
             catch (AbandonedMutexException) { return true; }
         }
 
-        private static bool TryReadUnderGate(RecoveryStorage storage, Mutex gate, int milliseconds, out RecoveryRecord record)
+        internal static bool TryReadUnderGate(RecoveryStorage storage, Mutex gate, int milliseconds, out RecoveryRecord record)
         {
             record = null;
             if (!Enter(gate, milliseconds)) return false;
@@ -142,13 +143,16 @@ namespace AgentSleep
                 {
                     if (!Enter(gate, GateGrace))
                     {
-                        // Only terminate the recorded app when its display operation holds the gate.
-                        RecoveryRecord pending = storage.Read();
-                        if (pending == null || pending.Id != id || !pending.Pending) return 0;
-                        if (signals == null || !signals.Mutation.WaitOne(0)) return 2;
-                        if (owner == null) owner = RecoveryOwner.Open(pending, storage.Session);
-                        if (owner != null) owner.Stop();
-                        if (!Enter(gate, GateGrace)) return 2;
+                        RecoveryRecord pending = ReadAvailableJournal(storage);
+                        if (pending != null && (pending.Id != id || !pending.Pending)) return 0;
+                        if (pending != null && (pending.Phase == RecoveryPhase.Prepared || pending.Phase == RecoveryPhase.Extending ||
+                            pending.Phase == RecoveryPhase.Isolating) && signals != null && signals.Mutation.WaitOne(0))
+                        {
+                            if (owner == null) owner = RecoveryOwner.Open(pending, storage.Session);
+                            if (owner != null && !owner.Exited) owner.Stop();
+                        }
+                        // A restorer holds the gate until it publishes exact, fallback, or failure.
+                        if (!Enter(gate, RestoreJoinMilliseconds)) return 2;
                     }
 
                     try
@@ -494,7 +498,24 @@ namespace AgentSleep
                 if (signals != null && record.Phase == RecoveryPhase.Isolated) signals.Pulse.Set();
                 if (record.Pending && signals != null && (signals.Failed.WaitOne(0) || (helper != null && helper.HasExited))
                     && !triedRecovery && record.Phase != RecoveryPhase.Failed && record.Phase != RecoveryPhase.Fallback)
-                    QueueRestore(RecoveryReason.WatchdogUnavailable);
+                {
+                    if (record.Phase == RecoveryPhase.Restoring)
+                    {
+                        using (var gate = storage.OpenGate())
+                        {
+                            RecoveryRecord latest;
+                            if (!RecoveryWorker.TryReadUnderGate(storage, gate, 0, out latest))
+                            {
+                                Update(record);
+                                return;
+                            }
+                            if (latest == null || latest.Id != id) return;
+                            record = latest;
+                        }
+                    }
+                    if (record.Pending && record.Phase != RecoveryPhase.Failed && record.Phase != RecoveryPhase.Fallback)
+                        QueueRestore(RecoveryReason.WatchdogUnavailable);
+                }
 
                 Update(record);
                 if (record.Pending && Volatile.Read(ref queued) == 0 && Volatile.Read(ref queueFinished) == 2
